@@ -4,17 +4,29 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import rateLimit from 'express-rate-limit'
 import promptRouter from './routes/prompt'
+import projectsRouter from './routes/projects'
 import { buildRequireAuth } from './middleware/requireAuth'
 
 dotenv.config()
 
 const app = express()
 const PORT = process.env.PORT || 4000
-const corsOrigin = (process.env.CORS_ORIGIN
-  || 'http://127.0.0.1:1420,http://localhost:1420,http://127.0.0.1:3000,http://localhost:3000')
+const DEFAULT_CORS_ORIGINS = [
+  'http://127.0.0.1:1420',
+  'http://localhost:1420',
+  'http://127.0.0.1:3000',
+  'http://localhost:3000',
+  'tauri://localhost',
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+]
+const configuredOrigins = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean)
+const corsOrigin = Array.from(
+  new Set(configuredOrigins.length > 0 ? [...configuredOrigins, 'tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost'] : DEFAULT_CORS_ORIGINS)
+)
 const promptLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true })
 const requireAuth = buildRequireAuth()
 
@@ -29,9 +41,7 @@ app.get('/health', (_req, res) => {
 
 // Routes
 app.use('/api/prompt', promptLimiter, requireAuth, promptRouter)
-app.get('/api/projects', (_req, res) => {
-  res.json({ projects: [], message: 'Projects endpoint — coming soon' })
-})
+app.use('/api/projects', requireAuth, projectsRouter)
 
 app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   if (

@@ -1,17 +1,19 @@
 import { useEffect } from 'react'
 import { useEditorStore } from '../store/useEditorStore'
+import { isTypingTarget } from '../lib/editorUtils'
 
 /**
  * Global keyboard shortcuts for the ghost preview and history.
  *
- * Enter        → accept proposal  (only when proposal exists AND prompt is closed)
- * Esc          → reject proposal  (only when proposal exists AND prompt is closed)
+ * Enter        → accept proposal  (only when proposal exists AND modals are closed)
+ * Esc          → reject proposal  (only when proposal exists AND modals are closed)
  * Cmd/Ctrl+Z   → undo
  * Cmd/Ctrl+⇧Z  → redo
  */
-export const useGhostPreviewKeys = () => {
+export const useGhostPreviewKeys = (isModalOpen = false) => {
   const proposedComposition = useEditorStore((s) => s.proposedComposition)
   const isPromptOpen        = useEditorStore((s) => s.isPromptOpen)
+  const assetPickerClip     = useEditorStore((s) => s.assetPickerClip)
   const acceptProposal      = useEditorStore((s) => s.acceptProposal)
   const rejectProposal      = useEditorStore((s) => s.rejectProposal)
   const undo                = useEditorStore((s) => s.undo)
@@ -19,11 +21,16 @@ export const useGhostPreviewKeys = () => {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey
+      if (isModalOpen || isPromptOpen || assetPickerClip || isTypingTarget(e.target)) {
+        return
+      }
 
-      // ── Accept / Reject (proposal must exist, prompt must be closed) ────────
-      if (proposedComposition && !isPromptOpen) {
-        if (e.key === 'Enter') {
+      const mod = e.metaKey || e.ctrlKey
+      const key = e.key.toLowerCase()
+
+      // ── Accept / Reject (proposal must exist, modals must be closed) ────────
+      if (proposedComposition) {
+        if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement) && !(e.target instanceof HTMLAnchorElement)) {
           e.preventDefault()
           acceptProposal()
           return
@@ -35,14 +42,14 @@ export const useGhostPreviewKeys = () => {
       }
 
       // ── Undo (⌘Z / Ctrl+Z) ──────────────────────────────────────────────────
-      if (mod && !e.shiftKey && e.key === 'z') {
+      if (mod && !e.shiftKey && key === 'z') {
         e.preventDefault()
         undo()
         return
       }
 
       // ── Redo (⌘⇧Z / Ctrl+⇧Z / Ctrl+Y) ─────────────────────────────────────
-      if ((mod && e.shiftKey && e.key === 'z') || (mod && e.key === 'y')) {
+      if ((mod && e.shiftKey && key === 'z') || (mod && !e.shiftKey && key === 'y')) {
         e.preventDefault()
         redo()
         return
@@ -51,5 +58,5 @@ export const useGhostPreviewKeys = () => {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [proposedComposition, isPromptOpen, acceptProposal, rejectProposal, undo, redo])
+  }, [isModalOpen, proposedComposition, isPromptOpen, assetPickerClip, acceptProposal, rejectProposal, undo, redo])
 }

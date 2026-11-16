@@ -52,3 +52,75 @@ export function rippleDelete(clips: Clip[], clipId: string): Clip[] {
       }
     })
 }
+
+export function resolveTrimmedClip(
+  clip: Clip,
+  newStart: number,
+  newEnd: number,
+  edge?: 'left' | 'right'
+): Clip {
+  const activeEdge =
+    edge ??
+    (newEnd === clip.endFrame && newStart !== clip.startFrame
+      ? 'left'
+      : newStart === clip.startFrame && newEnd !== clip.endFrame
+        ? 'right'
+        : undefined)
+
+  let startFrame: number
+  let endFrame: number
+
+  if (activeEdge === 'left') {
+    endFrame = Math.max(0, clip.endFrame)
+    startFrame = Math.max(0, Math.min(newStart, endFrame))
+  } else if (activeEdge === 'right') {
+    startFrame = Math.max(0, clip.startFrame)
+    endFrame = Math.max(startFrame, newEnd)
+  } else {
+    startFrame = Math.max(0, Math.min(newStart, newEnd))
+    endFrame = Math.max(startFrame, newEnd)
+  }
+
+  if (
+    clip.mediaType &&
+    clip.mediaType !== 'text' &&
+    clip.mediaStart != null &&
+    clip.mediaEnd != null
+  ) {
+    const minStart = Math.max(0, clip.startFrame - clip.mediaStart)
+    if (activeEdge !== 'right') {
+      startFrame = Math.max(minStart, Math.min(startFrame, endFrame))
+    }
+
+    let mediaStart = clip.mediaStart + (startFrame - clip.startFrame)
+
+    const maxEnd =
+      clip.mediaDurationFrames != null
+        ? clip.endFrame + Math.max(clip.mediaDurationFrames - 1 - clip.mediaEnd, 0)
+        : Number.MAX_SAFE_INTEGER
+
+    endFrame = Math.max(startFrame, Math.min(endFrame, maxEnd))
+    let mediaEnd = clip.mediaEnd + (endFrame - clip.endFrame)
+
+    if (clip.mediaDurationFrames != null) {
+      mediaEnd = Math.min(mediaEnd, clip.mediaDurationFrames - 1)
+    }
+
+    mediaStart = Math.max(0, mediaStart)
+    mediaEnd = Math.max(mediaStart, mediaEnd)
+
+    return {
+      ...clip,
+      startFrame,
+      endFrame,
+      mediaStart,
+      mediaEnd,
+    }
+  }
+
+  return {
+    ...clip,
+    startFrame,
+    endFrame,
+  }
+}

@@ -1,4 +1,9 @@
-import { supabase } from '../lib/supabaseClient'
+import { supabase } from './supabaseClient'
+import type { Track } from '../store/useEditorStore'
+import { deleteProjectAssets } from './assetService'
+import { createAutoSave } from './autoSave'
+
+export { createAutoSave }
 
 function cloud() {
   if (!supabase) {
@@ -6,14 +11,11 @@ function cloud() {
   }
   return supabase
 }
-import { Track } from '../store/useEditorStore'
-import { deleteProjectAssets } from './assetService'
 
 function normalizeSupabaseError(error: unknown, fallback: string): string {
   if (!error) return fallback
   if (typeof error === 'object') {
     const e = error as Record<string, unknown>
-    // Supabase errors have a `message` field and sometimes a `code` field
     const msg = typeof e.message === 'string' ? e.message : null
     const code = typeof e.code === 'string' ? e.code : null
     if (code === 'PGRST116') return 'project not found — it may have been deleted'
@@ -47,11 +49,27 @@ export interface CreateProjectData {
   composition_tree?: Track[]
 }
 
+async function resolveAuthenticatedUserId(): Promise<string> {
+  const client = cloud()
+  const { data: sessionData } = await client.auth.getSession()
+  if (sessionData.session?.user?.id) {
+    return sessionData.session.user.id
+  }
+
+  const { data: userData, error } = await client.auth.getUser()
+  if (error || !userData.user?.id) {
+    throw new Error('auth/session missing — please sign in again')
+  }
+  return userData.user.id
+}
+
 // Create a new project
 export async function createProject(data: CreateProjectData): Promise<Project> {
+  const userId = await resolveAuthenticatedUserId()
   const { data: project, error } = await cloud()
     .from('projects')
     .insert({
+      user_id: userId,
       name: data.name || 'Untitled Project',
       description: data.description || null,
       fps: data.fps || 30,
@@ -98,7 +116,7 @@ export async function getProject(id: string): Promise<Project | null> {
 
   if (error) {
     // PGRST116 = row not found — treat as stale ID, not a hard error
-    if ((error as any).code === 'PGRST116') return null
+    if ((error as { code?: string }).code === 'PGRST116') return null
     console.error('Failed to fetch project:', error)
     throw new Error(normalizeSupabaseError(error, 'project fetch failed'))
   }
@@ -162,38 +180,4 @@ export async function deleteProject(projectId: string): Promise<void> {
   }
 
   await deleteProjectAssets(projectId)
-}
-
-// Auto-save helper (debounced save)
-export function createAutoSave(debounceMs: number = 3000) {
-  let timeoutId: NodeJS.Timeout | null = null
-  let pendingSave: (() => Promise<void>) | null = null
-
-  return {
-    schedule: (saveFn: () => Promise<void>) => {
-      pendingSave = saveFn
-
-      if (timeoutId) {
-        clearTimeout(timeoutId)
-      }
-
-      timeoutId = setTimeout(() => {
-        if (pendingSave) {
-          pendingSave().catch(console.error)
-          pendingSave = null
-        }
-      }, debounceMs)
-    },
-
-    flush: async () => {
-      if (timeoutId) {
-        clearTimeout(timeoutId)
-        timeoutId = null
-      }
-      if (pendingSave) {
-        await pendingSave()
-        pendingSave = null
-      }
-    },
-  }
 }

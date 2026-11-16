@@ -4,12 +4,17 @@ import { PIXELS_PER_FRAME } from './constants'
 
 interface Props {
   totalHeight: number
+  pixelsPerFrame?: number
   onHandleMouseDown: (e: React.MouseEvent) => void
 }
 
-export const Playhead: React.FC<Props> = ({ totalHeight, onHandleMouseDown }) => {
+export const Playhead: React.FC<Props> = React.memo(({
+  totalHeight,
+  pixelsPerFrame = PIXELS_PER_FRAME,
+  onHandleMouseDown,
+}) => {
   const playheadPosition = useEditorStore((s) => s.playheadPosition)
-  const left = playheadPosition * PIXELS_PER_FRAME
+  const left = playheadPosition * pixelsPerFrame
   const hitWidth = 16
 
   return (
@@ -54,4 +59,5 @@ export const Playhead: React.FC<Props> = ({ totalHeight, onHandleMouseDown }) =>
       />
     </div>
   )
-}
+})
+Playhead.displayName = 'Playhead'

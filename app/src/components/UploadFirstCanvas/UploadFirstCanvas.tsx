@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react'
-import { importLocalPath, schedulePlaybackProxy, uploadAsset } from '../../lib/assetService'
+import { detectMediaTypeFromFile, importLocalPath, schedulePlaybackProxy, uploadAsset } from '../../lib/assetService'
 import { isDesktopApp, pickMediaPaths } from '../../lib/desktop'
+import { MAX_BROWSER_UPLOAD_BYTES, MAX_BROWSER_UPLOAD_LABEL } from '../../lib/editorUtils'
 import { useEditorStore } from '../../store/useEditorStore'
 import { toast } from '../../lib/toastStore'
 
@@ -47,7 +48,7 @@ export const UploadFirstCanvas: React.FC<UploadFirstCanvasProps> = ({
     if (uploading) return 'Uploading video...'
     return isDesktopApp()
       ? 'Open an MP4, MOV, MKV, or WebM from this computer'
-      : 'Upload an MP4, MOV, or WebM video to start editing'
+      : 'Upload an MP4, MOV, MKV, or WebM video to start editing'
   }, [projectStatus, uploading])
 
   const placeVideo = (asset: { playback_url: string; id: string; name: string; duration_seconds: number | null; preview_url?: string | null }) => {
@@ -71,13 +72,13 @@ export const UploadFirstCanvas: React.FC<UploadFirstCanvasProps> = ({
       return
     }
 
-    if (!file.type.startsWith('video/')) {
+    if (detectMediaTypeFromFile(file) !== 'video') {
       toast.error('Upload a video first. Audio and images can be added after the editor opens.')
       return
     }
 
-    if (file.size > 200 * 1024 * 1024) {
-      toast.error('Video is too large for the current browser-first workflow. Limit is 200MB.')
+    if (file.size > MAX_BROWSER_UPLOAD_BYTES) {
+      toast.error(`Video is too large for the current browser-first workflow. Limit is ${MAX_BROWSER_UPLOAD_LABEL}.`)
       return
     }
 
@@ -161,9 +162,10 @@ export const UploadFirstCanvas: React.FC<UploadFirstCanvasProps> = ({
       <input
         ref={inputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,.mkv,.mov"
         onChange={handleInputChange}
         disabled={!canUpload}
+        aria-label="Choose initial video file"
         style={{ display: 'none' }}
       />
 

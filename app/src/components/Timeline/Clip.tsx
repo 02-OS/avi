@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import { type Clip } from '../../store/useEditorStore'
 import { useWaveformStore } from '../../lib/waveformStore'
 import { PIXELS_PER_FRAME, TRACK_HEIGHT, CLIP_PADDING } from './constants'
@@ -6,20 +6,45 @@ import { PIXELS_PER_FRAME, TRACK_HEIGHT, CLIP_PADDING } from './constants'
 interface Props {
   clip: Clip
   isSelected: boolean
+  pixelsPerFrame?: number
   onSelect: (event: React.MouseEvent) => void
+  onDoubleClick?: (event: React.MouseEvent) => void
   onTrimStart: (event: React.MouseEvent, edge: 'left' | 'right') => void
 }
 
-export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimStart }) => {
-  const left = clip.startFrame * PIXELS_PER_FRAME
-  const width = Math.max((clip.endFrame - clip.startFrame + 1) * PIXELS_PER_FRAME - 2, 6)
+export const ClipBlock: React.FC<Props> = React.memo(({
+  clip,
+  isSelected,
+  pixelsPerFrame = PIXELS_PER_FRAME,
+  onSelect,
+  onDoubleClick,
+  onTrimStart,
+}) => {
+  const left = clip.startFrame * pixelsPerFrame
+  const width = Math.max((clip.endFrame - clip.startFrame + 1) * pixelsPerFrame - 2, 6)
   const peaks = useWaveformStore((state) => (clip.assetId ? state.peaks[clip.assetId] : undefined))
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const isMissing = Boolean(clip.isMissingAsset || clip.status === 'missing')
   const showWaveform = Boolean(peaks && peaks.length > 0 && (clip.mediaType === 'audio' || clip.mediaType === 'video'))
+
+  const visiblePeaks = useMemo(() => {
+    if (!peaks || peaks.length === 0) return undefined
+    const totalDur = clip.mediaDurationFrames
+    if (totalDur != null && totalDur > 0 && (clip.mediaStart != null || clip.mediaEnd != null)) {
+      const srcStart = Math.max(0, clip.mediaStart ?? 0)
+      const srcEnd = Math.min(totalDur - 1, clip.mediaEnd ?? (totalDur - 1))
+      const startRatio = Math.min(1, Math.max(0, srcStart / totalDur))
+      const endRatio = Math.min(1, Math.max(startRatio, (srcEnd + 1) / totalDur))
+      const startIdx = Math.floor(startRatio * peaks.length)
+      const endIdx = Math.max(startIdx + 1, Math.ceil(endRatio * peaks.length))
+      return peaks.slice(startIdx, endIdx)
+    }
+    return peaks
+  }, [peaks, clip.mediaStart, clip.mediaEnd, clip.mediaDurationFrames])
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !peaks || peaks.length === 0) return
+    if (!canvas || !visiblePeaks || visiblePeaks.length === 0) return
 
     const drawWidth = Math.max(1, width - 14)
     const drawHeight = TRACK_HEIGHT - CLIP_PADDING * 2 - 8
@@ -32,25 +57,30 @@ export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimS
     context.setTransform(ratio, 0, 0, ratio, 0, 0)
     context.clearRect(0, 0, drawWidth, drawHeight)
     context.fillStyle = 'rgba(255,255,255,0.55)'
-    const barWidth = drawWidth / peaks.length
-    peaks.forEach((peak, index) => {
+    const barWidth = drawWidth / visiblePeaks.length
+    visiblePeaks.forEach((peak, index) => {
       const barHeight = Math.max(1, peak * (drawHeight - 2))
       context.fillRect(index * barWidth, (drawHeight - barHeight) / 2, Math.max(1, barWidth - 0.4), barHeight)
     })
-  }, [peaks, width])
+  }, [visiblePeaks, width])
 
   return (
     <div
       data-clip={clip.id}
-      title={`${clip.label} [${clip.startFrame} – ${clip.endFrame}]`}
+      title={
+        isMissing
+          ? `${clip.label} [${clip.startFrame} – ${clip.endFrame}] (Missing media — double-click to relink or Delete to remove)`
+          : `${clip.label} [${clip.startFrame} – ${clip.endFrame}]`
+      }
       onMouseDown={onSelect}
+      onDoubleClick={onDoubleClick}
       style={{
         position: 'absolute',
         left,
         top: CLIP_PADDING,
         width,
         height: TRACK_HEIGHT - CLIP_PADDING * 2,
-        background: clip.isMissingAsset ? 'rgba(104, 104, 104, 0.65)' : clip.color,
+        background: isMissing ? 'rgba(104, 104, 104, 0.65)' : clip.color,
         borderRadius: 4,
         overflow: 'hidden',
         display: 'flex',
@@ -59,13 +89,13 @@ export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimS
         cursor: 'grab',
         userSelect: 'none',
         boxShadow: isSelected ? '0 0 0 1px rgba(255,255,255,0.65), 0 2px 10px rgba(0,0,0,0.45)' : '0 1px 4px rgba(0,0,0,0.45)',
-        border: clip.isMissingAsset
-          ? '1px dashed rgba(255,255,255,0.45)'
+        border: isMissing
+          ? '1px dashed rgba(251,191,36,0.7)'
           : isSelected
             ? '1px solid rgba(255,255,255,0.85)'
             : '1px solid rgba(255,255,255,0.12)',
         flexShrink: 0,
-        opacity: clip.isMissingAsset ? 0.85 : 1,
+        opacity: isMissing ? 0.88 : 1,
       }}
     >
       <div
@@ -106,7 +136,7 @@ export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimS
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
-          paddingRight: clip.isMissingAsset ? 70 : 0,
+          paddingRight: isMissing ? 70 : 0,
           position: 'relative',
           zIndex: 1,
           textShadow: '0 1px 2px rgba(0,0,0,0.8)',
@@ -115,7 +145,7 @@ export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimS
         {clip.label}
       </span>
 
-      {clip.isMissingAsset && (
+      {isMissing && (
         <span
           style={{
             position: 'absolute',
@@ -126,6 +156,9 @@ export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimS
             fontWeight: 700,
             color: '#fbbf24',
             letterSpacing: 0.6,
+            background: 'rgba(15,15,15,0.7)',
+            padding: '1px 4px',
+            borderRadius: 3,
           }}
         >
           MISSING
@@ -147,4 +180,5 @@ export const ClipBlock: React.FC<Props> = ({ clip, isSelected, onSelect, onTrimS
       />
     </div>
   )
-}
+})
+ClipBlock.displayName = 'ClipBlock'

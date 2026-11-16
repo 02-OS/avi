@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useEditorStore, type Track } from '../../store/useEditorStore'
 import { useAuth } from '../../lib/authContext'
+import { isDesktopApp } from '../../lib/desktop'
 import { toast } from '../../lib/toastStore'
 import { hasUsableVideoClips } from '../../lib/editorUtils'
 import { applyLocalPrompt } from '../../lib/localPrompt'
+import { useModalFocusTrap } from '../../hooks/useModalFocusTrap'
 
 // ── Types shared with the API ──────────────────────────────────────────────────
 export interface PromptRequest {
@@ -26,8 +28,17 @@ export interface PromptResponse {
   }
 }
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)
+  ?.trim()
+  .replace(/\/+$/, '')
+
+const PROMPT_ENDPOINT = API_BASE_URL
+  ? `${API_BASE_URL}/api/prompt`
+  : isDesktopApp()
+    ? 'http://localhost:4000/api/prompt'
+    : '/api/prompt'
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
-/** Clips whose range overlaps with the selection (or all clips if no selection). */
 const restorePreviewUrls = (nextTracks: Track[], currentTracks: Track[]): Track[] => {
   const previews = new Map<string, string>()
   for (const track of currentTracks) {
@@ -54,15 +65,13 @@ const getContextClips = (tracks: Track[], range: { startFrame: number; endFrame:
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export const PromptModal: React.FC = () => {
-  const {
-    isPromptOpen,
-    closePrompt,
-    currentSelection,
-    compositionTree,
-    totalFrames,
-    fps,
-    setProposedComposition,
-  } = useEditorStore()
+  const isPromptOpen           = useEditorStore((s) => s.isPromptOpen)
+  const closePrompt            = useEditorStore((s) => s.closePrompt)
+  const currentSelection       = useEditorStore((s) => s.currentSelection)
+  const compositionTree        = useEditorStore((s) => s.compositionTree)
+  const totalFrames            = useEditorStore((s) => s.totalFrames)
+  const fps                    = useEditorStore((s) => s.fps)
+  const setProposedComposition = useEditorStore((s) => s.setProposedComposition)
   const { session } = useAuth()
 
   const [prompt,   setPrompt]   = useState('')
@@ -70,10 +79,14 @@ export const PromptModal: React.FC = () => {
   const [response, setResponse] = useState<PromptResponse | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
 
+  const modalRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
   const canUseAi = hasUsableVideoClips(compositionTree)
 
-  // Auto-focus input when modal opens
+  useModalFocusTrap(isPromptOpen, modalRef, closePrompt)
+
+  // Reset state when modal opens, and abort in-flight requests when closed/unmounted.
   useEffect(() => {
     if (isPromptOpen) {
       setTimeout(() => inputRef.current?.focus(), 50)
@@ -81,13 +94,20 @@ export const PromptModal: React.FC = () => {
       setStatus('idle')
       setResponse(null)
       setErrorMsg('')
+    } else {
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
+    }
+
+    return () => {
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
     }
   }, [isPromptOpen])
 
   const handleSubmit = useCallback(async () => {
     const trimmedPrompt = prompt.trim()
-    
-    // Validation
+
     if (!trimmedPrompt) {
       toast.warning('Please enter a prompt')
       return
@@ -97,7 +117,7 @@ export const PromptModal: React.FC = () => {
       toast.info('Upload a video first, then AI can work on your timeline.')
       return
     }
-    
+
     if (trimmedPrompt.length > 1000) {
       toast.error('Prompt too long (max 1000 characters)')
       return
@@ -146,13 +166,18 @@ export const PromptModal: React.FC = () => {
       compositionContext: { tracks: compositionTree, totalFrames, fps },
     }
 
+    abortControllerRef.current?.abort()
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     try {
-      const res = await fetch('/api/prompt', {
+      const res = await fetch(PROMPT_ENDPOINT, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
         },
+        signal: controller.signal,
         body: JSON.stringify(body),
       })
 
@@ -161,10 +186,12 @@ export const PromptModal: React.FC = () => {
       }
 
       const data: PromptResponse = await res.json()
-      
+
       if (!data.modifiedComposition || !data.modifiedComposition.tracks) {
         throw new Error('Invalid response from AI: missing composition data')
       }
+
+      if (controller.signal.aborted) return
 
       setResponse({
         ...data,
@@ -176,24 +203,30 @@ export const PromptModal: React.FC = () => {
       setStatus('done')
       toast.success('AI response generated successfully!')
     } catch (err) {
+      if ((err instanceof Error && err.name === 'AbortError') || controller.signal.aborted) {
+        return
+      }
       console.warn('Cloud prompt failed, using the local editor', err)
       stageLocal('(cloud model unavailable)')
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null
+      }
     }
   }, [prompt, status, currentSelection, compositionTree, totalFrames, fps, canUseAi, session])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      handleSubmit()
+      void handleSubmit()
     }
   }
 
   // Instead of applying directly, stage as a ghost preview for side-by-side review
   const handlePreview = () => {
-    if (response?.modifiedComposition.tracks) {
-      setProposedComposition(response.modifiedComposition.tracks)
+    if (response?.modifiedComposition) {
+      setProposedComposition(response.modifiedComposition)
       closePrompt()
-      // User now sees split-screen; presses Enter to accept or Esc to reject
     }
   }
 
@@ -217,6 +250,11 @@ export const PromptModal: React.FC = () => {
 
       {/* ── Modal ── */}
       <div
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="prompt-modal-title"
+        tabIndex={-1}
         style={{
           position: 'fixed',
           top: '18%',
@@ -245,7 +283,9 @@ export const PromptModal: React.FC = () => {
             gap: 10,
           }}
         >
-          <span style={{ fontSize: 14, fontWeight: 700, color: '#e94560' }}>✦ AI Prompt</span>
+          <span id="prompt-modal-title" style={{ fontSize: 14, fontWeight: 700, color: '#e94560' }}>
+            ✦ AI Prompt
+          </span>
           <kbd
             style={{
               marginLeft: 'auto',
@@ -262,6 +302,7 @@ export const PromptModal: React.FC = () => {
           </kbd>
           <button
             onClick={closePrompt}
+            aria-label="Close AI prompt"
             style={{
               background: 'none',
               border: 'none',
@@ -306,12 +347,13 @@ export const PromptModal: React.FC = () => {
 
         {/* ── Input ── */}
         <div style={{ padding: '14px 16px', display: 'flex', gap: 10, alignItems: 'center' }}>
-          <span style={{ fontSize: 16, color: '#e94560', flexShrink: 0 }}>›</span>
+          <span style={{ fontSize: 16, color: '#e94560', flexShrink: 0 }} aria-hidden="true">›</span>
           <input
             ref={inputRef}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
+            aria-label="AI editing prompt"
             placeholder={
               canUseAi
                 ? 'e.g. "trim the intro, tighten the pause, and duplicate the ending shot"'
@@ -330,7 +372,7 @@ export const PromptModal: React.FC = () => {
             }}
           />
           <button
-            onClick={handleSubmit}
+            onClick={() => void handleSubmit()}
             disabled={!prompt.trim() || status === 'loading' || !canUseAi}
             style={{
               background: status === 'loading' ? '#333' : '#e94560',
@@ -371,6 +413,7 @@ export const PromptModal: React.FC = () => {
         {/* ── Response panel ── */}
         {status === 'error' && (
           <div
+            role="alert"
             style={{
               margin: '0 16px 16px',
               padding: '10px 14px',

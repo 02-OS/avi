@@ -4,15 +4,19 @@ import { PIXELS_PER_FRAME } from './constants'
 
 interface Props {
   totalHeight: number
+  pixelsPerFrame?: number
 }
 
-export const SelectionOverlay: React.FC<Props> = ({ totalHeight }) => {
+export const SelectionOverlay: React.FC<Props> = React.memo(({
+  totalHeight,
+  pixelsPerFrame = PIXELS_PER_FRAME,
+}) => {
   const currentSelection = useEditorStore((s) => s.currentSelection)
   if (!currentSelection) return null
 
   const { startFrame, endFrame } = currentSelection
-  const left  = startFrame * PIXELS_PER_FRAME
-  const width = Math.max((endFrame - startFrame + 1) * PIXELS_PER_FRAME, 2)
+  const left  = startFrame * pixelsPerFrame
+  const width = Math.max((endFrame - startFrame + 1) * pixelsPerFrame, 2)
 
   return (
     <div
@@ -30,4 +34,5 @@ export const SelectionOverlay: React.FC<Props> = ({ totalHeight }) => {
       }}
     />
   )
-}
+})
+SelectionOverlay.displayName = 'SelectionOverlay'

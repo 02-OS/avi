@@ -2,16 +2,16 @@
 
 ## Project Overview
 
-**avi** is a local-first AI video editor that combines a modern timeline-based editing interface with artificial intelligence capabilities. It allows users to upload media assets (video, audio, images), arrange them on a timeline, and use AI prompts to modify their video compositions.
+**avi** is a local-first AI video editor that combines a timeline-based editing interface with AI-assisted composition edits. It runs as a Tauri 2 desktop application (macOS, Windows, Linux) or browser preview, allowing users to import media assets (video, audio, images), arrange them on a multi-track timeline, and use AI prompts or local heuristics to modify compositions.
 
 ### Core Features
 
-1. **Timeline-Based Editing** - Multi-track timeline for video, audio, and overlay tracks
-2. **AI Prompt Integration** - Use natural language prompts to edit video compositions via Gemini AI
-3. **WebAssembly Processing** - Client-side video processing using WebAssembly (Rust-compiled)
-4. **Optional cloud sync** - Supabase auth and project persistence when configured. The editor runs offline without it
-5. **Video Export** - Client-side WebM export through MediaRecorder, with 720p and 1080p presets
-6. **Asset Library** - Browser uploads in IndexedDB, or native file references in the Tauri app
+1. **Timeline-Based Editing** - Multi-track timeline for video, audio, and overlay tracks with zoom, vertical scrolling, mute, add/remove tracks, snapping, split, duplicate, trim, and ripple delete
+2. **AI Prompt Integration** - Natural language timeline edits via Gemini (`gemini-2.5-flash` default) when configured, with automatic word-boundary local fallback
+3. **WebAssembly Processing** - Client-side pixel filters and luma statistics compiled from Rust (`avi-wasm`), using an in-place linear WASM scratch buffer
+4. **Optional Cloud Sync** - Supabase Auth (email/password + GitHub OAuth with desktop loopback callback), multi-project switching (`public.projects`), and cloud asset metadata (`public.assets`)
+5. **Video Export** - Native desktop FFmpeg MP4/WebM export (when `ffmpeg` is available) and deterministic frame-stepped browser WebM export (720p and 1080p presets)
+6. **Asset Library** - Browser uploads stored in IndexedDB (`avi-local-assets` + `avi-media-storage` + `avi-waveform-cache`), or native file references served through an authenticated loopback `MediaServer` in the desktop app
 
 ---
 
@@ -23,22 +23,23 @@
 avi/
 ├── app/                    # Frontend (React + Vite)
 │   ├── src/
-│   │   ├── components/    # React components
-│   │   ├── hooks/        # Custom React hooks
-│   │   ├── lib/          # Utility libraries & services
-│   │   ├── store/        # Zustand state management
-│   │   ├── wasm-pkg/     # WebAssembly module
-│   │   └── remotion/     # Remotion compositions
+│   │   ├── components/    # React components (AssetLibrary, PlayerPanel, Timeline, Modals, WasmPanel)
+│   │   ├── hooks/         # Custom React hooks (shortcuts, project manager, WASM, modal focus trap)
+│   │   ├── lib/           # Services (assets, projects, export, WASM pixel filters, waveforms)
+│   │   ├── store/         # Zustand state management
+│   │   ├── wasm-pkg/      # Generated WebAssembly module (gitignored; built by wasm-pack)
+│   │   └── remotion/      # Remotion preview composition
 │   └── package.json
 │
 ├── api/                   # Backend (Express + Node.js)
 │   ├── src/
-│   │   ├── routes/       # API endpoints
-│   │   └── middleware/   # Express middleware
+│   │   ├── routes/        # /api/prompt and /api/projects endpoints
+│   │   └── middleware/    # JWT verification (HS256 + ES256/RS256 JWKS)
 │   └── package.json
 │
-├── src-tauri/             # Tauri 2 desktop shell
-└── package.json           # Root workspace configuration
+├── wasm/                  # Rust pixel-filter WASM crate (`avi-wasm`)
+├── src-tauri/             # Tauri 2 desktop shell (`avi`)
+└── package.json           # Root workspace configuration (Node >= 22.6.0)
 ```
 
 ### Tech Stack
@@ -46,16 +47,16 @@ avi/
 | Layer | Technology |
 |-------|------------|
 | Frontend Framework | React 18 |
-| Build Tool | Vite |
-| State Management | Zustand |
-| Preview | Remotion Player |
-| Export | Canvas + MediaRecorder (WebM) |
+| Build Tool | Vite 6 |
+| State Management | Zustand 5 |
+| Preview | Remotion Player 4 |
+| Export | Native FFmpeg (`export_timeline`) on desktop, deterministic Canvas + MediaRecorder WebM fallback |
 | Desktop | Tauri 2 |
-| WebAssembly | Rust (wasm-pack) |
-| Backend | Express.js (optional) |
+| WebAssembly | Rust (`wasm-pack`) |
+| Backend | Express.js 4 (optional) |
 | Database/Auth | Supabase (optional) |
-| AI Integration | Gemini when configured, local heuristics otherwise |
-| Validation | Zod |
+| AI Integration | Gemini (`gemini-2.5-flash`) when configured, local heuristics otherwise |
+| Validation | Zod 4 |
 
 ---
 
@@ -69,82 +70,44 @@ App.tsx
 │   ├── Logo & branding
 │   ├── Asset Library toggle
 │   ├── Save button
-│   ├── Export button
-│   ├── Undo/Redo buttons
-│   ├── Project ID indicator
+│   ├── Export preset selector & Export button
+│   ├── Undo / Redo buttons
+│   ├── WASM benchmark panel toggle
+│   ├── Project switcher button
 │   ├── Offline indicator
-│   └── User info / Sign Out
+│   └── Keyboard shortcuts & Sign In / Sign Out
 │
-├── WasmPanel (WASM video processor)
+├── WasmPanel (optional, toggle-gated WASM benchmark widget)
 │
 ├── Main Content Area
 │   ├── AssetLibrary (sidebar)
-│   │   ├── Upload zone
-│   │   └── Asset grid
-│   │
-│   └── PlayerPanel (video preview)
-│       ├── Preview player
-│       ├── Ghost preview bar
-│       └── Error boundary
+│   └── PlayerPanel (video preview + GhostPreviewBar + keyboard-accessible scrubber)
 │
-├── Timeline
-│   ├── TimelineRuler (frame numbers)
-│   ├── TimelineTrack (track container)
-│   │   ├── Clip (media clip)
-│   │   └── Playhead
-│   ├── Selection overlay
-│   └── Track controls
-│
-├── PromptModal (AI prompt interface)
-│
-├── AuthModal (login/signup)
-│
+├── Timeline (zoom, vertical scroll, track add/mute/delete, ruler, clips, playhead)
+├── ProjectSwitcherModal (multi-project switcher, create/rename/delete)
+├── PromptModal (AI prompt interface with VITE_API_BASE_URL support)
+├── AuthModal (login/signup + GitHub OAuth)
 ├── UploadFirstCanvas (initial state)
-│
-└── ToastContainer (notifications)
+└── ToastContainer (accessible polite live region)
 ```
 
 ### State Management
 
-The editor uses **Zustand** for state management (`useEditorStore.ts`):
+The editor uses **Zustand** (`useEditorStore.ts`) with fine-grained selectors to isolate high-frequency `playheadPosition` updates to leaf components (`Playhead`, `PlayerScrubber`, `ActiveClipLabelsOverlay`, `PausedWasmGrade`):
 
-**Key State Properties:**
 - `compositionTree: Track[]` - Current timeline composition
-- `proposedComposition: Track[] | null` - AI-generated preview (pending acceptance)
-- `playheadPosition: number` - Current frame position
+- `proposedComposition: Track[] | null` / `proposedMeta` - AI-generated preview (auto-opens split-screen comparison)
+- `playheadPosition: number` - Current frame position (`Number.isFinite` guarded)
 - `selectedClip: SelectedClip | null` - Currently selected clip
 - `totalFrames: number` - Total timeline duration
 - `fps: number` - Frames per second (default: 30)
-- `history: Track[][]` - Undo history stack
-- `historyIndex: number` - Current position in history
+- `history: Track[][]` - Undo history stack (up to 50 snapshots)
 
-**Key Actions:**
-- `addClip()`, `removeClip()`, `trimClip()`, `splitClip()`, `duplicateClip()`
-- `addTrack()` - Add video/audio/overlay tracks
-- `undo()`, `redo()` - History navigation
-- `openPrompt()`, `acceptProposal()`, `rejectProposal()` - AI workflow
+### Persistence
 
-### Authentication
-
-Supabase Auth integration (`authContext.tsx`):
-- Email/password sign-in and sign-up
-- GitHub OAuth
-- Session persistence with automatic token refresh
-
-### Project Management
-
-The `useProjectManager` hook handles:
-- Project creation/loading from Supabase
-- Auto-save every 3 seconds
-- Manual save functionality
-- Offline capability with IndexedDB
-- Project repair on load
-
-### Asset Management
-
-- **Upload**: Files stored in IndexedDB for local access
-- **Storage Service**: `mediaStorage.ts` handles IndexedDB operations
-- **Asset Service**: `assetService.ts` resolves asset URLs and handles missing assets
+- **Local project state**: Stored in `localStorage` under `avi.localProject.v1` when signed out.
+- **Local media bytes & metadata**: Stored in IndexedDB (`avi-local-assets` for asset metadata, `avi-media-storage` for browser file blobs, `avi-waveform-cache` for decoded audio peaks).
+- **Cloud sync**: When signed in with Supabase configured, `useProjectManager` saves projects to `public.projects` (with debounced auto-save retained across failures + `flush()`/`cancel()`), migrates `'local'` IndexedDB assets on sign-in, and syncs asset records to `public.assets`.
 
 ---
 
@@ -152,103 +115,27 @@ The `useProjectManager` hook handles:
 
 ### API Endpoints
 
-**Base URL:** `http://localhost:4000`
+**Default Base URL:** `http://localhost:4000` (configurable via `VITE_API_BASE_URL` for packaged desktop builds)
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/health` | GET | No | Health check |
-| `/api/prompt` | POST | Yes | AI prompt processing |
-| `/api/projects` | GET | Yes | List projects (placeholder) |
-
-### Prompt API (`/api/prompt`)
-
-**Request:**
-```typescript
-{
-  prompt: string;                           // User's AI instruction
-  frameRange: { startFrame: number; endFrame: number } | null;  // Optional frame scope
-  compositionContext: {
-    tracks: Track[];                        // Current timeline
-    totalFrames: number;
-    fps: number;
-  }
-}
-```
-
-**Response:**
-```typescript
-{
-  success: boolean;
-  explanation: string;                      // What the AI did
-  modifiedComposition: Composition;        // Modified timeline
-}
-```
-
-### AI Processing Pipeline
-
-1. **Validation** - Zod schema validates incoming request
-2. **Context Building** - Constructs prompt with composition data
-3. **Gemini API Call** - Sends to Google Gemini 2.0 Flash
-4. **Response Parsing** - Extracts JSON from Gemini response
-5. **Schema Validation** - Validates AI response structure
-6. **Fallback Mode** - If API fails, uses mock LLM with heuristic mutations
-
-### Mock LLM Capabilities
-
-When Gemini API is unavailable, the fallback provides:
-- Color changes (red, blue, green, purple, etc.)
-- Clip extending/trimming by frame count
-- Clip renaming
-- Opacity adjustments
-- Clip splitting at midpoint
-- Text overlay addition
-- Pixel filters: grayscale, sepia, invert, brightness, warm
+| `/api/prompt` | POST | Yes | AI prompt processing (rate-limited: 10 req/min) |
+| `/api/projects` | GET / POST | Yes | List or create user projects via Supabase RLS |
+| `/api/projects/:id` | GET / PATCH / DELETE | Yes | Read, update, or delete a user project via Supabase RLS |
 
 ### Authentication Middleware
 
-Uses JWT validation via `express-jwt` and JWKS from Supabase:
-- Validates Supabase access tokens
-- Returns 401 on invalid/missing tokens
-- Rate limiting: 10 requests per minute
+`requireAuth.ts` verifies Supabase Bearer JWTs using:
+- `HS256` via `SUPABASE_JWT_SECRET` (when configured), and/or
+- `ES256` / `RS256` via `${SUPABASE_URL}/auth/v1/.well-known/jwks.json`.
 
----
+### AI Processing Pipeline (`/api/prompt`)
 
-## Key Modules & Services
-
-### `videoExportService.ts`
-
-Handles client-side video export:
-- Composites tracks onto a canvas in realtime
-- Applies WASM pixel filters when the frame can be read
-- Records WebM with MediaRecorder at 720p or 1080p
-- Saves through a native dialog in the desktop app, or a browser download on the web
-
-### `clipValidation.ts`
-
-Validates and repairs timeline state:
-- Ensures clip start/end frames are valid
-- Repairs orphaned clips
-- Normalizes timeline offsets
-
-### `projectService.ts`
-
-Supabase project CRUD:
-- `createProject()` - Create new project
-- `getProject()` - Load project by ID
-- `updateProjectComposition()` - Save timeline changes
-
-### `supabaseClient.ts`
-
-Creates a Supabase client only when `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set. Otherwise the editor stays local.
-
----
-
-## WebAssembly Module
-
-Located in `app/src/wasm-pkg/`:
-- Rust-compiled WASM for client-side processing
-- Video frame manipulation
-- Performance-critical operations
+1. **Validation** - Zod enforces `totalFrames >= 1`, `frameRange.endFrame >= frameRange.startFrame`, and `clip.trackId === track.id`.
+2. **Gemini API Call** - Calls `GEMINI_MODEL` (default `gemini-2.5-flash`) with `x-goog-api-key` header and a 30s timeout.
+3. **Media Integrity** - `restoreOriginalClipMedia` preserves original `assetUrl`, `assetId`, and `mediaDurationFrames` on returned clips.
+4. **Fallback Mode** - If Gemini is unavailable or validation fails, `mockLLM` applies word-boundary keyword mutations with media-duration clamping.
 
 ---
 
@@ -259,126 +146,16 @@ Located in `app/src/wasm-pkg/`:
 | `Cmd/Ctrl + K` | Open AI prompt modal |
 | `Cmd/Ctrl + Z` | Undo |
 | `Cmd/Ctrl + Y` / `Cmd/Ctrl + Shift + Z` | Redo |
-| `Enter` | Accept AI proposal |
-| `Esc` | Reject AI proposal / Close modal |
+| `Enter` | Accept AI proposal (outside inputs/buttons) |
+| `Esc` | Reject AI proposal / Close active modal |
 | `S` | Split selected clip at playhead |
 | `D` | Duplicate selected clip |
-| `Delete` | Delete selected clip |
-| `Space` | Play/Pause |
-
----
-
-## Data Models
-
-### Track
-```typescript
-{
-  id: string;
-  name: string;
-  type: 'video' | 'audio' | 'overlay';
-  clips: Clip[];
-}
-```
-
-### Clip
-```typescript
-{
-  id: string;
-  trackId: string;
-  startFrame: number;
-  endFrame: number;
-  label: string;
-  color: string;
-  assetUrl?: string;
-  assetId?: string;
-  mediaType?: 'video' | 'audio' | 'image' | 'text';
-  mediaStart?: number;
-  mediaEnd?: number;
-  mediaDurationFrames?: number;
-  opacity?: number;
-  text?: string;           // For text overlays
-  fontSize?: number;
-  fontColor?: string;
-  isMissingAsset?: boolean;
-  status?: 'ready' | 'missing' | 'loading';
-}
-```
-
----
-
-## Database Schema (Supabase)
-
-```sql
--- Projects table
-CREATE TABLE public.projects (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id),
-  composition_tree JSONB NOT NULL,
-  total_frames INTEGER NOT NULL,
-  fps INTEGER NOT NULL DEFAULT 30,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Row Level Security policies for user-owned projects
-```
+| `Delete` / `Backspace` | Delete selected clip (`Shift+Delete` to ripple delete) |
+| `←` / `→` | Nudge selected clip by 1 frame (`Shift` for 5 frames) |
+| `Space` | Play / Pause |
 
 ---
 
 ## Environment Variables
 
-### Frontend (app/.env)
-```
-VITE_SUPABASE_URL=your_supabase_url
-VITE_SUPABASE_ANON_KEY=your_anon_key
-```
-
-### Backend (api/.env)
-```
-PORT=4000
-CORS_ORIGIN=http://127.0.0.1:1420
-GEMINI_MODEL=gemini-3.6-flash
-SUPABASE_URL=your_supabase_url
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-GEMINI_API_KEY=your_gemini_api_key
-```
-
----
-
-## Running the Project
-
-The supported way to run avi is the desktop app:
-
-```bash
-npm install
-npm run tauri:dev
-```
-
-That opens the native window. `npm run tauri:build` produces the installable bundle for the current OS.
-
-`npm run dev` is a browser preview on http://127.0.0.1:3000 plus the optional API. The desktop window loads Vite on http://127.0.0.1:1420 instead, so it does not share that port. See the README for Rust, WebView, and wasm-pack prerequisites.
-
----
-
-## Known Bugs & Fixes
-
-The codebase references several bug fixes (marked as FIX: comments):
-- **FIX: BUG-B**: Missing clips should not inflate timeline duration
-- **FIX: 1**: Split operations must create valid preview trim ranges
-- **FIX: 2**: Missing assets require re-upload prompt
-- **FIX: 3**: Repaired timelines should restart at frame 0
-
----
-
-## Summary
-
-avi is a local-first video editor that combines:
-1. **Modern React frontend** with Vite for fast development
-2. **Zustand state management** for complex timeline editing
-3. **Remotion Player** for preview and a MediaRecorder WebM export
-4. **WebAssembly** for client-side pixel filters
-5. **Tauri 2** for the macOS, Windows, and Linux app
-6. **Optional Supabase** for auth and project sync
-7. **Optional Gemini**, with local keyword edits when the model is unavailable
-
-The editor works offline. IndexedDB holds browser-uploaded media. The desktop app references files on disk. See `ARCHITECTURE.md` for the decisions behind the shell, proxies, and AI fallback.
+See `.env.example`, `app/.env.example`, and `api/.env.example` for current defaults and optional configuration variables.

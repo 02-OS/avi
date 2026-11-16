@@ -28,11 +28,10 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:* asset: https://asset.localhost; media-src 'self' data: blob: http://127.0.0.1:* http://localhost:* asset: https://asset.localhost; font-src 'self' data:; connect-src 'self' blob: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/**",
           "$VIDEO/**",
           "$AUDIO/**",
           "$DOCUMENT/**",

@@ -40,6 +40,7 @@ export async function allowMediaPath(path: string): Promise<void> {
 }
 
 let mediaBase: Promise<string> | null = null
+let mediaSessionToken: Promise<string> | null = null
 
 function mediaBaseUrl(): Promise<string> {
   if (!mediaBase) {
@@ -51,11 +52,33 @@ function mediaBaseUrl(): Promise<string> {
   return mediaBase
 }
 
+function mediaToken(): Promise<string> {
+  if (!mediaSessionToken) {
+    mediaSessionToken = invoke<string>('media_token').catch((error: unknown) => {
+      mediaSessionToken = null
+      throw error
+    })
+  }
+  return mediaSessionToken
+}
+
 // WebKitGTK cannot play asset:// URLs in a video element. The shell serves
-// allowed files from 127.0.0.1 instead. Call allowMediaPath before this.
+// allowed files from 127.0.0.1 with a per-launch token instead. Call allowMediaPath before this.
 export async function desktopMediaUrl(path: string): Promise<string> {
-  const base = await mediaBaseUrl()
-  return `${base}/media?path=${encodeURIComponent(path)}`
+  const [base, token] = await Promise.all([mediaBaseUrl(), mediaToken()])
+  return `${base}/media?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`
+}
+
+export function extractLocalPathFromDesktopMediaUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname !== '127.0.0.1' || parsed.pathname !== '/media') {
+      return null
+    }
+    return parsed.searchParams.get('path')
+  } catch {
+    return null
+  }
 }
 
 export function isSupportedMediaPath(path: string, videosOnly = false): boolean {
@@ -85,23 +108,67 @@ export async function generatePlaybackProxy(source: string, assetId: string): Pr
   return invoke<string>('generate_proxy', { source, assetId })
 }
 
+export async function deletePlaybackProxy(assetId: string): Promise<void> {
+  if (!isDesktopApp()) return
+  await invoke('delete_proxy', { assetId })
+}
+
+export async function pickExportPath(defaultFilename: string): Promise<string | null> {
+  return invoke<string | null>('pick_export_path', { defaultFilename })
+}
+
+export async function writeExportBytes(path: string, bytes: Uint8Array): Promise<void> {
+  await invoke('write_export_bytes', { path, bytes: Array.from(bytes) })
+}
+
+export interface NativeExportClipInput {
+  id: string
+  trackType: 'video' | 'audio' | 'overlay'
+  trackMuted: boolean
+  startFrame: number
+  endFrame: number
+  mediaType: 'video' | 'audio' | 'image' | 'text'
+  sourcePath?: string
+  mediaStart?: number
+  mediaEnd?: number
+  opacity?: number
+  pixelFilter?: string
+  text?: string
+  fontSize?: number
+  fontColor?: string
+}
+
+export interface NativeExportTimelineRequest {
+  outputPath: string
+  width: number
+  height: number
+  fps: number
+  totalFrames: number
+  clips: NativeExportClipInput[]
+}
+
+export async function exportTimelineNative(request: NativeExportTimelineRequest): Promise<string> {
+  return invoke<string>('export_timeline', { request })
+}
+
+export async function startOAuthLoopback(): Promise<string> {
+  return invoke<string>('start_oauth_loopback')
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  await invoke('open_external_url', { url })
+}
+
 export async function saveExportFile(filename: string, blob: Blob): Promise<'saved' | 'downloaded' | 'cancelled'> {
   if (!isDesktopApp()) {
     downloadBlob(filename, blob)
     return 'downloaded'
   }
 
-  const { save } = await import('@tauri-apps/plugin-dialog')
-  const { writeFile } = await import('@tauri-apps/plugin-fs')
-  const extension = filename.split('.').pop() || 'webm'
-  const path = await save({
-    defaultPath: filename,
-    filters: [{ name: 'Video', extensions: [extension] }],
-  })
-
+  const path = await pickExportPath(filename)
   if (!path) return 'cancelled'
 
-  await writeFile(path, new Uint8Array(await blob.arrayBuffer()))
+  await writeExportBytes(path, new Uint8Array(await blob.arrayBuffer()))
   return 'saved'
 }
 

@@ -1,12 +1,18 @@
 import React from 'react'
-import { useToastStore, Toast } from '../../lib/toastStore'
+import { useToastStore, type Toast } from '../../lib/toastStore'
 
 export function ToastContainer() {
   const toasts = useToastStore((state) => state.toasts)
   const removeToast = useToastStore((state) => state.removeToast)
 
   return (
-    <div style={styles.container}>
+    <div
+      role="region"
+      aria-label="Notifications"
+      aria-live="polite"
+      aria-atomic="false"
+      style={styles.container}
+    >
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} onRemove={removeToast} />
       ))}
@@ -33,15 +39,20 @@ function ToastItem({ toast, onRemove }: { toast: Toast; onRemove: (id: string) =
 
   return (
     <div
+      role={toast.type === 'error' ? 'alert' : 'status'}
       style={{
         ...styles.toast,
         background: color.bg,
         borderColor: color.border,
       }}
     >
-      <span style={{ ...styles.icon, color: color.icon }}>{icons[toast.type]}</span>
+      <span style={{ ...styles.icon, color: color.icon }} aria-hidden="true">{icons[toast.type]}</span>
       <span style={styles.message}>{toast.message}</span>
-      <button onClick={() => onRemove(toast.id)} style={styles.closeButton}>
+      <button
+        onClick={() => onRemove(toast.id)}
+        aria-label="Dismiss notification"
+        style={styles.closeButton}
+      >
         ×
       </button>
     </div>
@@ -88,22 +99,4 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 4px',
     lineHeight: 1,
   },
-}
-
-// Add animation keyframes to global CSS
-if (typeof document !== 'undefined') {
-  const style = document.createElement('style')
-  style.textContent = `
-    @keyframes slideIn {
-      from {
-        transform: translateX(100%);
-        opacity: 0;
-      }
-      to {
-        transform: translateX(0);
-        opacity: 1;
-      }
-    }
-  `
-  document.head.appendChild(style)
 }

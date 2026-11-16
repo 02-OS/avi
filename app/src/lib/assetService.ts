@@ -1,7 +1,25 @@
+import { create } from 'zustand'
 import { type Track, useEditorStore } from '../store/useEditorStore'
-import { allowMediaPath, desktopMediaUrl, ffmpegAvailable, generatePlaybackProxy, isDesktopApp, isSupportedMediaPath, localFileSize } from './desktop'
+import {
+  allowMediaPath,
+  deletePlaybackProxy,
+  desktopMediaUrl,
+  ffmpegAvailable,
+  generatePlaybackProxy,
+  isDesktopApp,
+  isSupportedMediaPath,
+  localFileSize,
+} from './desktop'
+import { LOCAL_PROJECT_ID } from './localProject'
 import { deleteMediaBlob, loadMediaBlob, restoreMediaBlob, saveMediaBlob } from './mediaStorage'
-import { peaksFromArrayBuffer, useWaveformStore } from './waveformStore'
+import { supabase } from './supabaseClient'
+import {
+  deleteCachedWaveformPeaks,
+  loadCachedWaveformPeaks,
+  peaksFromArrayBuffer,
+  saveCachedWaveformPeaks,
+  useWaveformStore,
+} from './waveformStore'
 
 export interface Asset {
   id: string
@@ -36,8 +54,22 @@ interface StoredAssetRecord {
   status: 'ready' | 'missing'
   local_path?: string | null
   proxy_path?: string | null
+  storage_path?: string | null
   waveform?: number[] | null
   blob?: Blob
+}
+
+interface CloudAssetRow {
+  id: string
+  user_id: string
+  project_id: string | null
+  name: string
+  file_type: string
+  file_size: number | null
+  duration_seconds: number | null
+  storage_url: string
+  thumbnail_url: string | null
+  created_at: string
 }
 
 export interface UploadAssetOptions {
@@ -45,10 +77,56 @@ export interface UploadAssetOptions {
   projectId?: string
 }
 
+interface AssetStoreState {
+  projectId: string | null
+  assets: Asset[]
+  loading: boolean
+  loaded: boolean
+  setAssetsForProject: (projectId: string, assets: Asset[]) => void
+  upsertAsset: (projectId: string, asset: Asset) => void
+  removeAsset: (assetId: string) => void
+  updateAssetPreviewUrl: (assetId: string, previewUrl: string) => void
+  setLoading: (loading: boolean) => void
+  reset: () => void
+}
+
+export const useAssetStore = create<AssetStoreState>((set) => ({
+  projectId: null,
+  assets: [],
+  loading: false,
+  loaded: false,
+  setAssetsForProject: (projectId, assets) =>
+    set({ projectId, assets, loading: false, loaded: true }),
+  upsertAsset: (projectId, asset) =>
+    set((state) => {
+      if (state.projectId && state.projectId !== projectId) return state
+      const filtered = state.assets.filter((item) => item.id !== asset.id)
+      return {
+        projectId,
+        assets: [asset, ...filtered],
+        loaded: true,
+      }
+    }),
+  removeAsset: (assetId) =>
+    set((state) => ({
+      assets: state.assets.filter((item) => item.id !== assetId),
+    })),
+  updateAssetPreviewUrl: (assetId, previewUrl) =>
+    set((state) => ({
+      assets: state.assets.map((item) =>
+        item.id === assetId ? { ...item, preview_url: previewUrl } : item
+      ),
+    })),
+  setLoading: (loading) => set({ loading }),
+  reset: () => set({ projectId: null, assets: [], loading: false, loaded: false }),
+}))
+
 const DB_NAME = 'avi-local-assets'
 const DB_VERSION = 1
 const STORE_NAME = 'assets'
+const STORAGE_BUCKET = 'assets'
 const EXPORTED_FILE_NAME_PATTERN = /^avi-export-/i
+const THUMBNAIL_TIMEOUT_MS = 10_000
 
 let dbPromise: Promise<IDBDatabase> | null = null
 
@@ -113,34 +191,60 @@ const createAssetId = () => {
   return `asset-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 }
 
-const detectFileType = (file: File): Asset['file_type'] => {
+const fileTypeFromName = (name: string): Asset['file_type'] => {
+  const extension = name.split('.').pop()?.toLowerCase() ?? ''
+  if (['mp4', 'mov', 'webm', 'mkv', 'm4v'].includes(extension)) return 'video'
+  if (['mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg'].includes(extension)) return 'audio'
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)) return 'image'
+  throw new Error('Unsupported file. Choose a video, audio file, or image.')
+}
+
+export const detectMediaTypeFromFile = (file: File): Asset['file_type'] | null => {
   if (file.type.startsWith('video/')) return 'video'
   if (file.type.startsWith('audio/')) return 'audio'
   if (file.type.startsWith('image/')) return 'image'
+  try {
+    return fileTypeFromName(file.name)
+  } catch {
+    return null
+  }
+}
 
-  throw new Error('Unsupported file type. Please upload video, audio, or image files.')
+const detectFileType = (file: File): Asset['file_type'] => {
+  const detected = detectMediaTypeFromFile(file)
+  if (!detected) {
+    throw new Error('Unsupported file type. Please upload video, audio, or image files.')
+  }
+  return detected
 }
 
 const detectMediaMetadata = (file: File, fileType: Asset['file_type']) =>
-  new Promise<{ durationSeconds: number | null; width: number | null; height: number | null }>((resolve, _reject) => {
-    const TIMEOUT_MS = 15000
-    const timeoutId = setTimeout(() => {
-      URL.revokeObjectURL(objectUrl)
-      resolve({ durationSeconds: null, width: null, height: null })
-    }, TIMEOUT_MS)
+  new Promise<{ durationSeconds: number | null; width: number | null; height: number | null }>((resolve) => {
+    const TIMEOUT_MS = 15_000
+    let settled = false
 
     const cleanup = () => {
       clearTimeout(timeoutId)
       URL.revokeObjectURL(objectUrl)
     }
 
+    const finish = (value: { durationSeconds: number | null; width: number | null; height: number | null }) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
+    }
+
+    const timeoutId = setTimeout(() => {
+      finish({ durationSeconds: null, width: null, height: null })
+    }, TIMEOUT_MS)
+
     if (fileType === 'image') {
       const image = new Image()
       const objectUrl = URL.createObjectURL(file)
 
       image.onload = () => {
-        cleanup()
-        resolve({
+        finish({
           durationSeconds: null,
           width: image.naturalWidth || null,
           height: image.naturalHeight || null,
@@ -148,8 +252,7 @@ const detectMediaMetadata = (file: File, fileType: Asset['file_type']) =>
       }
 
       image.onerror = () => {
-        cleanup()
-        resolve({ durationSeconds: null, width: null, height: null })
+        finish({ durationSeconds: null, width: null, height: null })
       }
 
       image.src = objectUrl
@@ -162,17 +265,21 @@ const detectMediaMetadata = (file: File, fileType: Asset['file_type']) =>
     media.preload = 'metadata'
     media.onloadedmetadata = () => {
       const durationSeconds = Number.isFinite(media.duration) ? media.duration : null
-      cleanup()
-      resolve({
+      finish({
         durationSeconds,
-        width: fileType === 'video' ? (Number.isFinite((media as HTMLVideoElement).videoWidth) ? (media as HTMLVideoElement).videoWidth : null) : null,
-        height: fileType === 'video' ? (Number.isFinite((media as HTMLVideoElement).videoHeight) ? (media as HTMLVideoElement).videoHeight : null) : null,
+        width:
+          fileType === 'video' && Number.isFinite((media as HTMLVideoElement).videoWidth)
+            ? (media as HTMLVideoElement).videoWidth
+            : null,
+        height:
+          fileType === 'video' && Number.isFinite((media as HTMLVideoElement).videoHeight)
+            ? (media as HTMLVideoElement).videoHeight
+            : null,
       })
     }
 
     media.onerror = () => {
-      cleanup()
-      resolve({ durationSeconds: null, width: null, height: null })
+      finish({ durationSeconds: null, width: null, height: null })
     }
 
     media.src = objectUrl
@@ -182,7 +289,7 @@ const getAssetRecord = async (assetId: string): Promise<StoredAssetRecord | null
   const database = await getDatabase()
   const transaction = database.transaction(STORE_NAME, 'readonly')
   const store = transaction.objectStore(STORE_NAME)
-  const record = await requestToPromise(store.get(assetId))
+  const record = (await requestToPromise(store.get(assetId))) as StoredAssetRecord | undefined
   await transactionToPromise(transaction)
   return record ?? null
 }
@@ -209,6 +316,82 @@ const desktopPlaybackUrl = async (path: string | null | undefined): Promise<stri
   return desktopMediaUrl(path)
 }
 
+async function getSignedCloudUserId(): Promise<string | null> {
+  if (!supabase) return null
+  try {
+    const { data } = await supabase.auth.getSession()
+    return data.session?.user?.id ?? null
+  } catch {
+    return null
+  }
+}
+
+async function syncAssetToCloud(record: StoredAssetRecord, file?: File): Promise<void> {
+  if (!supabase || record.project_id === LOCAL_PROJECT_ID) return
+
+  const userId = await getSignedCloudUserId()
+  if (!userId) return
+
+  try {
+    let storageUrl = record.storage_path || (record.local_path ? `file://${record.local_path}` : `indexeddb://${record.id}`)
+    let uploadedStoragePath: string | null = record.storage_path ?? null
+
+    if (file && !record.local_path) {
+      const safeName = record.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+      const objectPath = `${userId}/${record.project_id}/${record.id}/${safeName}`
+      const { error: uploadError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(objectPath, file, { upsert: true, contentType: file.type || undefined })
+
+      if (!uploadError) {
+        storageUrl = objectPath
+        uploadedStoragePath = objectPath
+      }
+    }
+
+    const { error } = await supabase.from('assets').upsert(
+      {
+        id: record.id,
+        user_id: userId,
+        project_id: record.project_id,
+        name: record.name,
+        file_type: record.file_type,
+        file_size: record.file_size,
+        duration_seconds: record.duration_seconds,
+        storage_url: storageUrl,
+        thumbnail_url: record.thumbnail_url,
+      },
+      { onConflict: 'id' }
+    )
+
+    if (error) {
+      console.warn('Cloud asset metadata sync skipped:', error.message)
+      return
+    }
+
+    if (uploadedStoragePath && uploadedStoragePath !== record.storage_path) {
+      await putAssetRecord({ ...record, storage_path: uploadedStoragePath })
+    }
+  } catch (error) {
+    console.warn('Cloud asset sync unavailable:', error)
+  }
+}
+
+async function deleteCloudAssetRecord(assetId: string, storagePath?: string | null): Promise<void> {
+  if (!supabase) return
+  const userId = await getSignedCloudUserId()
+  if (!userId) return
+
+  try {
+    if (storagePath && !storagePath.startsWith('indexeddb://') && !storagePath.startsWith('file://')) {
+      await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]).catch(() => undefined)
+    }
+    await supabase.from('assets').delete().eq('id', assetId)
+  } catch (error) {
+    console.warn('Cloud asset deletion skipped:', error)
+  }
+}
+
 const resolveAssetPlaybackUrl = async (record: StoredAssetRecord): Promise<string | null> => {
   const localPlaybackUrl = await desktopPlaybackUrl(record.local_path)
   if (localPlaybackUrl) {
@@ -220,6 +403,20 @@ const resolveAssetPlaybackUrl = async (record: StoredAssetRecord): Promise<strin
   if (indexedPlaybackUrl) {
     rememberWaveform(record.id, record.waveform)
     return indexedPlaybackUrl
+  }
+
+  if (record.storage_path && supabase && !record.storage_path.startsWith('indexeddb://') && !record.storage_path.startsWith('file://')) {
+    try {
+      const { data } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .createSignedUrl(record.storage_path, 3600)
+      if (data?.signedUrl) {
+        rememberWaveform(record.id, record.waveform)
+        return data.signedUrl
+      }
+    } catch {
+      // Fall through to legacy blob check or missing status
+    }
   }
 
   if (!(record.blob instanceof Blob)) {
@@ -283,21 +480,47 @@ export async function uploadAsset({
   }
 
   const asset = toAsset(record, playbackUrl)
+  useAssetStore.getState().upsertAsset(projectId, asset)
   void captureWaveform(asset, file)
+  void syncAssetToCloud(record, file)
   return asset
+}
+
+async function fetchCloudAssetsForProject(projectId: string): Promise<CloudAssetRow[]> {
+  if (!supabase || projectId === LOCAL_PROJECT_ID) return []
+  const userId = await getSignedCloudUserId()
+  if (!userId) return []
+
+  try {
+    const { data, error } = await supabase
+      .from('assets')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false })
+
+    if (error || !Array.isArray(data)) return []
+    return data as CloudAssetRow[]
+  } catch {
+    return []
+  }
 }
 
 export async function getProjectAssets(projectId: string): Promise<Asset[]> {
   const database = await getDatabase()
   const transaction = database.transaction(STORE_NAME, 'readonly')
   const index = transaction.objectStore(STORE_NAME).index('project_id')
-  const records = await requestToPromise(index.getAll(projectId))
+  const records = (await requestToPromise(index.getAll(projectId))) as StoredAssetRecord[] | undefined
   await transactionToPromise(transaction)
 
-  const assets = await Promise.all(
-    (records ?? []).map(async (record) => {
+  const localRecords = records ?? []
+  const localIds = new Set(localRecords.map((r) => r.id))
+
+  const localAssets = await Promise.all(
+    localRecords.map(async (record) => {
       if (record.waveform && record.waveform.length > 0) {
         useWaveformStore.getState().setPeaks(record.id, record.waveform)
+      } else {
+        void loadCachedWaveformPeaks(record.id)
       }
       const playbackUrl = await resolveAssetPlaybackUrl(record)
       const previewUrl = await desktopPlaybackUrl(record.proxy_path)
@@ -305,17 +528,113 @@ export async function getProjectAssets(projectId: string): Promise<Asset[]> {
     })
   )
 
-  return assets
-    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+  const cloudRows = await fetchCloudAssetsForProject(projectId)
+  const remoteOnlyAssets = await Promise.all(
+    cloudRows
+      .filter((row) => !localIds.has(row.id))
+      .map(async (row): Promise<Asset> => {
+        let playbackUrl = ''
+        if (
+          supabase &&
+          row.storage_url &&
+          !row.storage_url.startsWith('indexeddb://') &&
+          !row.storage_url.startsWith('file://')
+        ) {
+          try {
+            const { data } = await supabase.storage
+              .from(STORAGE_BUCKET)
+              .createSignedUrl(row.storage_url, 3600)
+            playbackUrl = data?.signedUrl ?? ''
+          } catch {
+            playbackUrl = ''
+          }
+        }
+        const fileType: Asset['file_type'] =
+          row.file_type === 'audio' || row.file_type === 'image' ? row.file_type : 'video'
+        return {
+          id: row.id,
+          project_id: row.project_id ?? projectId,
+          name: row.name,
+          file_type: fileType,
+          file_size: row.file_size,
+          duration_seconds: row.duration_seconds,
+          playback_url: playbackUrl,
+          thumbnail_url: row.thumbnail_url,
+          local_path: null,
+          preview_url: null,
+          created_at: row.created_at,
+          mime_type: null,
+          width: null,
+          height: null,
+          status: playbackUrl ? 'ready' : 'missing',
+        }
+      })
+  )
+
+  const merged = [...localAssets, ...remoteOnlyAssets].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at)
+  )
+
+  useAssetStore.getState().setAssetsForProject(projectId, merged)
+  return merged
+}
+
+export async function ensureProjectAssets(projectId: string): Promise<Asset[]> {
+  const state = useAssetStore.getState()
+  if (state.loaded && state.projectId === projectId) {
+    return state.assets
+  }
+  return getProjectAssets(projectId)
+}
+
+export async function loadProjectAssetsIntoStore(projectId: string): Promise<Asset[]> {
+  useAssetStore.getState().setLoading(true)
+  try {
+    return await getProjectAssets(projectId)
+  } finally {
+    useAssetStore.getState().setLoading(false)
+  }
+}
+
+export async function migrateProjectAssets(fromProjectId: string, toProjectId: string): Promise<void> {
+  if (!fromProjectId || !toProjectId || fromProjectId === toProjectId) return
+
+  const database = await getDatabase()
+  const transaction = database.transaction(STORE_NAME, 'readwrite')
+  const store = transaction.objectStore(STORE_NAME)
+  const index = store.index('project_id')
+  const records = (await requestToPromise(index.getAll(fromProjectId))) as StoredAssetRecord[] | undefined
+
+  const migratedRecords: StoredAssetRecord[] = []
+  for (const record of records ?? []) {
+    const updated: StoredAssetRecord = { ...record, project_id: toProjectId }
+    store.put(updated)
+    migratedRecords.push(updated)
+  }
+  await transactionToPromise(transaction)
+
+  if (migratedRecords.length > 0) {
+    for (const record of migratedRecords) {
+      void syncAssetToCloud(record)
+    }
+    await loadProjectAssetsIntoStore(toProjectId)
+    window.dispatchEvent(new Event('avi:assets-changed'))
+  }
 }
 
 export async function deleteAsset(assetId: string): Promise<void> {
+  const existing = await getAssetRecord(assetId)
   await deleteMediaBlob(assetId)
+  await deleteCachedWaveformPeaks(assetId)
+  await deletePlaybackProxy(assetId).catch(() => undefined)
 
   const database = await getDatabase()
   const transaction = database.transaction(STORE_NAME, 'readwrite')
   transaction.objectStore(STORE_NAME).delete(assetId)
   await transactionToPromise(transaction)
+
+  useAssetStore.getState().removeAsset(assetId)
+  await deleteCloudAssetRecord(assetId, existing?.storage_path)
 }
 
 export async function deleteProjectAssets(projectId: string): Promise<void> {
@@ -323,14 +642,25 @@ export async function deleteProjectAssets(projectId: string): Promise<void> {
   const transaction = database.transaction(STORE_NAME, 'readwrite')
   const store = transaction.objectStore(STORE_NAME)
   const index = store.index('project_id')
-  const records = await requestToPromise(index.getAll(projectId))
+  const records = (await requestToPromise(index.getAll(projectId))) as StoredAssetRecord[] | undefined
 
   for (const record of records ?? []) {
     store.delete(record.id)
   }
 
   await transactionToPromise(transaction)
-  await Promise.all((records ?? []).map((record) => deleteMediaBlob(record.id)))
+  await Promise.all(
+    (records ?? []).map(async (record) => {
+      await deleteMediaBlob(record.id)
+      await deleteCachedWaveformPeaks(record.id)
+      await deletePlaybackProxy(record.id).catch(() => undefined)
+      await deleteCloudAssetRecord(record.id, record.storage_path)
+    })
+  )
+
+  if (useAssetStore.getState().projectId === projectId) {
+    useAssetStore.getState().reset()
+  }
 }
 
 export async function resolveTracksWithAssets(tracks: Track[], fps: number): Promise<Track[]> {
@@ -403,48 +733,82 @@ export async function resolveTracksWithAssets(tracks: Track[], fps: number): Pro
   }))
 }
 
-export async function generateVideoThumbnail(file: File): Promise<string | null> {
+function captureVideoThumbnail(src: string, revokeOnDone: boolean): Promise<string | null> {
   return new Promise((resolve) => {
     const video = document.createElement('video')
     video.preload = 'metadata'
     video.muted = true
     video.playsInline = true
 
-    video.onloadeddata = () => {
-      video.currentTime = Math.min(1, video.duration / 2)
-    }
-
-    video.onseeked = () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = 320
-      canvas.height = 180
-      const context = canvas.getContext('2d')
-
-      if (context) {
-        context.drawImage(video, 0, 0, canvas.width, canvas.height)
-        resolve(canvas.toDataURL('image/jpeg', 0.8))
-      } else {
-        resolve(null)
+    let settled = false
+    const cleanup = () => {
+      clearTimeout(timeoutId)
+      video.removeEventListener('loadeddata', onLoadedData)
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+      video.removeAttribute('src')
+      if (revokeOnDone && src.startsWith('blob:')) {
+        URL.revokeObjectURL(src)
       }
-
-      URL.revokeObjectURL(video.src)
     }
 
-    video.onerror = () => {
-      resolve(null)
-      URL.revokeObjectURL(video.src)
+    const finish = (value: string | null) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(value)
     }
 
-    video.src = URL.createObjectURL(file)
+    const captureFrame = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = 320
+        canvas.height = 180
+        const context = canvas.getContext('2d')
+        if (!context) {
+          finish(null)
+          return
+        }
+        context.drawImage(video, 0, 0, canvas.width, canvas.height)
+        finish(canvas.toDataURL('image/jpeg', 0.8))
+      } catch {
+        finish(null)
+      }
+    }
+
+    const onLoadedData = () => {
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0
+      const targetTime = duration > 0 ? Math.min(1, duration / 2) : 0
+      if (targetTime === 0 && video.readyState >= 2) {
+        captureFrame()
+        return
+      }
+      try {
+        video.currentTime = targetTime
+      } catch {
+        if (video.readyState >= 2) {
+          captureFrame()
+        } else {
+          finish(null)
+        }
+      }
+    }
+
+    const onSeeked = () => captureFrame()
+    const onError = () => finish(null)
+
+    const timeoutId = setTimeout(() => finish(null), THUMBNAIL_TIMEOUT_MS)
+
+    video.addEventListener('loadeddata', onLoadedData)
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('error', onError)
+    video.src = src
   })
 }
 
-const fileTypeFromName = (name: string): Asset['file_type'] => {
-  const extension = name.split('.').pop()?.toLowerCase() ?? ''
-  if (['mp4', 'mov', 'webm', 'mkv', 'm4v'].includes(extension)) return 'video'
-  if (['mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg'].includes(extension)) return 'audio'
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)) return 'image'
-  throw new Error('Unsupported file. Choose a video, audio file, or image.')
+export async function generateVideoThumbnail(file: File): Promise<string | null> {
+  const objectUrl = URL.createObjectURL(file)
+  return captureVideoThumbnail(objectUrl, true)
 }
 
 const metadataFromSrc = (src: string, fileType: Asset['file_type']) =>
@@ -458,7 +822,7 @@ const metadataFromSrc = (src: string, fileType: Asset['file_type']) =>
     }
     const timeoutId = window.setTimeout(() => {
       finish({ durationSeconds: null, width: null, height: null })
-    }, 15000)
+    }, 15_000)
 
     const done = (value: { durationSeconds: number | null; width: number | null; height: number | null }) => {
       window.clearTimeout(timeoutId)
@@ -487,25 +851,7 @@ const metadataFromSrc = (src: string, fileType: Asset['file_type']) =>
     media.src = src
   })
 
-const thumbnailFromSrc = (src: string) =>
-  new Promise<string | null>((resolve) => {
-    const video = document.createElement('video')
-    video.preload = 'metadata'
-    video.muted = true
-    video.playsInline = true
-    video.onloadeddata = () => {
-      video.currentTime = Math.min(1, (video.duration || 0) / 2)
-    }
-    video.onseeked = () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = 320
-      canvas.height = 180
-      const context = canvas.getContext('2d')
-      resolve(context ? (context.drawImage(video, 0, 0, canvas.width, canvas.height), canvas.toDataURL('image/jpeg', 0.8)) : null)
-    }
-    video.onerror = () => resolve(null)
-    video.src = src
-  })
+const thumbnailFromSrc = (src: string) => captureVideoThumbnail(src, false)
 
 const WAVEFORM_BYTE_LIMIT = 40 * 1024 * 1024
 
@@ -513,6 +859,9 @@ export async function captureWaveform(asset: Asset, file?: File): Promise<void> 
   if (asset.file_type === 'image') return
 
   try {
+    const cached = await loadCachedWaveformPeaks(asset.id)
+    if (cached && cached.length > 0) return
+
     let bytes: ArrayBuffer | null = null
     if (file && file.size <= WAVEFORM_BYTE_LIMIT) {
       bytes = await file.arrayBuffer()
@@ -531,7 +880,7 @@ export async function captureWaveform(asset: Asset, file?: File): Promise<void> 
     const peaks = await peaksFromArrayBuffer(bytes)
     if (!peaks) return
 
-    useWaveformStore.getState().setPeaks(asset.id, peaks)
+    await saveCachedWaveformPeaks(asset.id, peaks)
     const record = await getAssetRecord(asset.id)
     if (record) {
       await putAssetRecord({ ...record, waveform: peaks })
@@ -574,7 +923,9 @@ export async function importLocalPath(path: string, projectId: string): Promise<
 
   await putAssetRecord(record)
   const asset = toAsset(record, playbackUrl)
+  useAssetStore.getState().upsertAsset(projectId, asset)
   void captureWaveform(asset)
+  void syncAssetToCloud(record)
   return asset
 }
 
@@ -603,5 +954,7 @@ export async function schedulePlaybackProxy(asset: Asset): Promise<void> {
   if (!record) return
 
   await putAssetRecord({ ...record, proxy_path: proxyPath })
-  useEditorStore.getState().setAssetPreviewUrl(asset.id, await desktopMediaUrl(proxyPath))
+  const previewUrl = await desktopMediaUrl(proxyPath)
+  useEditorStore.getState().setAssetPreviewUrl(asset.id, previewUrl)
+  useAssetStore.getState().updateAssetPreviewUrl(asset.id, previewUrl)
 }

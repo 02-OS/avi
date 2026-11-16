@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { type AuthError, type Session, type User } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabaseClient'
+import { supabase } from './supabaseClient'
+import { isDesktopApp, openExternalUrl, startOAuthLoopback } from './desktop'
 
 const unavailable = (message: string) => ({ message }) as AuthError
 
@@ -72,6 +73,59 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  useEffect(() => {
+    if (!supabase || !isDesktopApp()) return
+
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    const client = supabase
+
+    void import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const stop = await listen<string>('avi://oauth-callback', async (event) => {
+        try {
+          const parsed = new URL(event.payload)
+          const code = parsed.searchParams.get('code')
+          if (code) {
+            const { error } = await client.auth.exchangeCodeForSession(code)
+            if (error) {
+              console.error('OAuth code exchange failed:', error)
+            }
+            return
+          }
+
+          const hash = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash
+          const hashParams = new URLSearchParams(hash)
+          const accessToken = hashParams.get('access_token')
+          const refreshToken = hashParams.get('refresh_token')
+          if (accessToken && refreshToken) {
+            const { error } = await client.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            })
+            if (error) {
+              console.error('OAuth session hydration failed:', error)
+            }
+          }
+        } catch (err) {
+          console.error('Failed to process desktop OAuth callback:', err)
+        }
+      })
+
+      if (cancelled) {
+        stop()
+        return
+      }
+      unlisten = stop
+    }).catch((err) => {
+      console.error('Failed to register OAuth callback listener:', err)
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
+
   const signIn = async (email: string, password: string) => {
     if (!supabase) return { error: unavailable('Cloud sign-in is not configured') }
     const { error } = await supabase.auth.signInWithPassword({ email, password })
@@ -92,6 +146,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signInWithGitHub = async () => {
     if (!supabase) return { error: unavailable('Cloud sign-in is not configured') }
+
+    if (isDesktopApp()) {
+      try {
+        const redirectTo = await startOAuthLoopback()
+        const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: 'github',
+          options: {
+            redirectTo,
+            skipBrowserRedirect: true,
+          },
+        })
+        if (error) return { error }
+        if (!data?.url) {
+          return { error: unavailable('Failed to initialize OAuth sign-in URL') }
+        }
+        await openExternalUrl(data.url)
+        return { error: null }
+      } catch (err) {
+        return {
+          error: unavailable(err instanceof Error ? err.message : 'Desktop OAuth failed to start'),
+        }
+      }
+    }
+
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'github',
       options: {

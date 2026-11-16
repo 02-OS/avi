@@ -19,6 +19,7 @@ const tracks = (): Track[] => [
         mediaType: 'video',
         mediaStart: 0,
         mediaEnd: 29,
+        mediaDurationFrames: 40,
       },
     ],
   },
@@ -66,4 +67,59 @@ test('local prompt adds a text overlay', () => {
   const overlay = result.tracks.find((track) => track.type === 'overlay')
   assert.equal(overlay?.clips[0]?.text, 'Cold open')
   assert.equal(overlay?.clips[0]?.mediaType, 'text')
+})
+
+test('local prompt uses word boundaries so "credits" does not trigger "red"', () => {
+  const result = applyLocalPrompt({
+    prompt: 'add title "End credits"',
+    frameRange: null,
+    tracks: tracks(),
+    totalFrames: 30,
+    fps: 30,
+  })
+
+  assert.equal(result.tracks[0]?.clips[0]?.color, '#e94560')
+})
+
+test('local prompt clamps shorter sub-5-frame clips and bounded extend', () => {
+  const shortTracks: Track[] = [
+    {
+      id: 'video-1',
+      name: 'Video 1',
+      type: 'video',
+      clips: [
+        {
+          id: 'short-1',
+          trackId: 'video-1',
+          startFrame: 10,
+          endFrame: 12,
+          label: 'Tiny',
+          color: '#e94560',
+          mediaType: 'video',
+          mediaStart: 0,
+          mediaEnd: 2,
+          mediaDurationFrames: 10,
+        },
+      ],
+    },
+  ]
+
+  const shortened = applyLocalPrompt({
+    prompt: 'make it shorter by 1 frames',
+    frameRange: null,
+    tracks: shortTracks,
+    totalFrames: 30,
+    fps: 30,
+  })
+  assert.equal(shortened.tracks[0]?.clips[0]?.endFrame, 11)
+
+  const extended = applyLocalPrompt({
+    prompt: 'extend by 50 frames',
+    frameRange: null,
+    tracks: shortTracks,
+    totalFrames: 30,
+    fps: 30,
+  })
+  assert.equal(extended.tracks[0]?.clips[0]?.endFrame, 19)
+  assert.equal(extended.tracks[0]?.clips[0]?.mediaEnd, 9)
 })

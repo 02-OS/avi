@@ -9,7 +9,7 @@ export interface Toast {
 
 interface ToastStore {
   toasts: Toast[]
-  addToast: (toast: Omit<Toast, 'id'>) => void
+  addToast: (toast: Omit<Toast, 'id'>) => string
   removeToast: (id: string) => void
 }
 
@@ -20,12 +20,15 @@ export const useToastStore = create<ToastStore>((set) => ({
     const id = `toast-${Date.now()}-${Math.random().toString(36).substring(7)}`
     set((state) => ({ toasts: [...state.toasts, { id, type, message, duration }] }))
 
-    // Auto-remove after duration
-    setTimeout(() => {
-      set((state) => ({
-        toasts: state.toasts.filter((t) => t.id !== id),
-      }))
-    }, duration)
+    if (duration > 0) {
+      setTimeout(() => {
+        set((state) => ({
+          toasts: state.toasts.filter((t) => t.id !== id),
+        }))
+      }, duration)
+    }
+
+    return id
   },
 
   removeToast: (id) => {

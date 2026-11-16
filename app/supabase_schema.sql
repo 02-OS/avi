@@ -28,7 +28,8 @@ CREATE POLICY "Users can view their own profile"
 
 CREATE POLICY "Users can update their own profile"
   ON public.profiles FOR UPDATE
-  USING (auth.uid() = id);
+  USING (auth.uid() = id)
+  WITH CHECK (auth.uid() = id);
 
 -- Trigger to create profile on signup
 CREATE OR REPLACE FUNCTION public.handle_new_user()
@@ -43,7 +44,7 @@ BEGIN
   );
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
@@ -54,7 +55,7 @@ CREATE TRIGGER on_auth_user_created
 -- =====================================================
 CREATE TABLE IF NOT EXISTS public.projects (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL DEFAULT auth.uid(),
   name TEXT NOT NULL DEFAULT 'Untitled Project',
   description TEXT,
   thumbnail_url TEXT,
@@ -80,7 +81,8 @@ CREATE POLICY "Users can create their own projects"
 
 CREATE POLICY "Users can update their own projects"
   ON public.projects FOR UPDATE
-  USING (auth.uid() = user_id);
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY "Users can delete their own projects"
   ON public.projects FOR DELETE
@@ -91,14 +93,11 @@ CREATE INDEX idx_projects_user_id ON public.projects(user_id);
 CREATE INDEX idx_projects_updated_at ON public.projects(updated_at DESC);
 
 -- =====================================================
--- 3. ASSETS TABLE (for video/audio assets)
+-- 3. ASSETS TABLE (for video/audio/image cloud metadata)
 -- =====================================================
--- NOTE: Assets are currently stored in browser IndexedDB (assetService.ts),
--- NOT in this table. This table is a placeholder for future cloud storage.
--- Do not query this table from the app until cloud upload is implemented.
 CREATE TABLE IF NOT EXISTS public.assets (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL DEFAULT auth.uid(),
   project_id UUID REFERENCES public.projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   file_type TEXT NOT NULL,  -- 'video', 'audio', 'image'
@@ -121,6 +120,11 @@ CREATE POLICY "Users can create their own assets"
   ON public.assets FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 
+CREATE POLICY "Users can update their own assets"
+  ON public.assets FOR UPDATE
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
+
 CREATE POLICY "Users can delete their own assets"
   ON public.assets FOR DELETE
   USING (auth.uid() = user_id);
@@ -134,13 +138,22 @@ CREATE INDEX idx_assets_project_id ON public.assets(project_id);
 -- =====================================================
 -- Go to Storage → Create bucket named "assets"
 -- Set it to private
--- Add the following RLS policies in Storage:
+-- Add the following owner-scoped RLS policies in Storage:
 
--- Storage Policy: Allow authenticated users to upload
--- INSERT policy with condition: auth.role() = 'authenticated'
+-- Storage Policy: Allow authenticated users to upload to their own folder ({user_id}/...)
+-- CREATE POLICY "Users can upload own assets"
+--   ON storage.objects FOR INSERT TO authenticated
+--   WITH CHECK (bucket_id = 'assets' AND (storage.foldername(name))[1] = auth.uid()::text);
 
--- Storage Policy: Allow authenticated users to read their files
--- SELECT policy with condition: auth.role() = 'authenticated'
+-- Storage Policy: Allow authenticated users to read their own files
+-- CREATE POLICY "Users can read own assets"
+--   ON storage.objects FOR SELECT TO authenticated
+--   USING (bucket_id = 'assets' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+-- Storage Policy: Allow authenticated users to update/delete their own files
+-- CREATE POLICY "Users can delete own assets"
+--   ON storage.objects FOR DELETE TO authenticated
+--   USING (bucket_id = 'assets' AND (storage.foldername(name))[1] = auth.uid()::text);
 
 -- =====================================================
 -- 5. UTILITY FUNCTIONS & MIGRATIONS
