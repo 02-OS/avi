@@ -817,7 +817,7 @@ fn respond_html(mut stream: TcpStream, status: &str, html: &str) {
 }
 
 fn handle_oauth_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     port: u16,
     app: &tauri::AppHandle,
 ) -> Option<String> {
