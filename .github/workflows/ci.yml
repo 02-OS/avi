@@ -36,7 +36,7 @@ jobs:
         run: cargo clippy --manifest-path wasm/Cargo.toml -- -D warnings
 
       - name: Build WASM package
-        run: wasm-pack build --target web --release --out-dir app/src/wasm-pkg --out-name avi_wasm wasm
+        run: wasm-pack build --target web --release --out-dir ../app/src/wasm-pkg --out-name avi_wasm wasm
 
       - name: Run frontend unit tests
         run: npm test
@@ -80,7 +80,7 @@ jobs:
       - name: Install dependencies and build frontendDist
         run: |
           npm ci
-          wasm-pack build --target web --release --out-dir app/src/wasm-pkg --out-name avi_wasm wasm
+          wasm-pack build --target web --release --out-dir ../app/src/wasm-pkg --out-name avi_wasm wasm
           npm run build --workspace=app
 
       - name: Check Tauri crate
