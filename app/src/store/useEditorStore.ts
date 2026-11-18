@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { validateClip } from '../lib/clipValidation'
 import type { PixelFilterName } from '../lib/pixelFilter'
-import { movedClipRange, rippleDelete } from '../lib/timelineEdit'
+import { movedClipRange, resolveTrimmedClip, rippleDelete } from '../lib/timelineEdit'
 
 export interface Clip {
   id: string
@@ -31,6 +31,7 @@ export interface Track {
   id: string
   name: string
   type: 'video' | 'audio' | 'overlay'
+  muted?: boolean
   clips: Clip[]
 }
 
@@ -42,6 +43,11 @@ export interface FrameRange {
 export interface SelectedClip {
   trackId: string
   clipId: string
+}
+
+export interface ProposedMeta {
+  totalFrames: number
+  fps: number
 }
 
 interface AssetClipInput {
@@ -71,6 +77,7 @@ interface EditorStore {
   // Compositions
   compositionTree: Track[]
   proposedComposition: Track[] | null
+  proposedMeta: ProposedMeta | null
 
   // History
   history: Track[][]
@@ -90,7 +97,9 @@ interface EditorStore {
   openPrompt: () => void
   closePrompt: () => void
 
-  setProposedComposition: (tracks: Track[]) => void
+  setProposedComposition: (
+    composition: Track[] | { tracks: Track[]; totalFrames?: number; fps?: number }
+  ) => void
   acceptProposal: () => void
   rejectProposal: () => void
 
@@ -101,13 +110,21 @@ interface EditorStore {
   redo: () => void
 
   addTrack: (name: string, type: Track['type']) => string
+  removeTrack: (trackId: string) => void
+  toggleTrackMute: (trackId: string) => void
   addClip: (trackId: string, clip: Omit<Clip, 'id' | 'trackId'>) => void
   removeClip: (trackId: string, clipId: string) => void
   addClipFromAsset: (trackId: string, asset: AssetClipInput) => void
   addAssetToTrackType: (trackType: Track['type'], asset: AssetClipInput) => void
   replaceClipAsset: (trackId: string, clipId: string, asset: AssetClipInput) => void
   splitClip: (trackId: string, clipId: string, splitFrame: number) => boolean
-  trimClip: (trackId: string, clipId: string, newStart: number, newEnd: number) => void
+  trimClip: (
+    trackId: string,
+    clipId: string,
+    newStart: number,
+    newEnd: number,
+    edge?: 'left' | 'right'
+  ) => void
   moveClip: (trackId: string, clipId: string, newStart: number, commit?: boolean) => void
   rippleDeleteClip: (trackId: string, clipId: string) => void
   setClipPixelFilter: (trackId: string, clipId: string, filter: PixelFilterName | null) => void
@@ -144,10 +161,7 @@ const isMissingClip = (clip: Clip) => clip.isMissingAsset || clip.status === 'mi
 
 const computeTotalFrames = (tracks: Track[]): number => {
   const maxFrame = tracks.reduce((trackMax, track) => {
-    // FIX: BUG-B - ignore missing clips so ghost placeholders cannot inflate timeline duration.
-    return track.clips.reduce((clipMax, clip) => (
-      isMissingClip(clip) ? clipMax : Math.max(clipMax, clip.endFrame + 1)
-    ), trackMax)
+    return track.clips.reduce((clipMax, clip) => Math.max(clipMax, clip.endFrame + 1), trackMax)
   }, 0)
 
   return Math.max(MIN_TOTAL_FRAMES, maxFrame)
@@ -170,7 +184,7 @@ const ensureSelectionExists = (tracks: Track[], selection: SelectedClip | null):
 const applyCommittedTree = (
   state: EditorStore,
   nextTree: Track[],
-  overrides: Partial<Pick<EditorStore, 'selectedClip' | 'totalFrames' | 'assetPickerClip'>> = {}
+  overrides: Partial<Pick<EditorStore, 'selectedClip' | 'totalFrames' | 'fps' | 'assetPickerClip'>> = {}
 ) => {
   const snapshot = cloneTracks(nextTree)
   const history = [...state.history.slice(0, state.historyIndex + 1), snapshot].slice(-MAX_HISTORY)
@@ -178,9 +192,11 @@ const applyCommittedTree = (
   return {
     compositionTree: snapshot,
     proposedComposition: null,
+    proposedMeta: null,
     history,
     historyIndex: history.length - 1,
     totalFrames: overrides.totalFrames ?? computeTotalFrames(snapshot),
+    fps: overrides.fps ?? state.fps,
     selectedClip: ensureSelectionExists(snapshot, overrides.selectedClip ?? state.selectedClip),
     assetPickerClip: ensureSelectionExists(snapshot, overrides.assetPickerClip ?? state.assetPickerClip),
   }
@@ -196,54 +212,10 @@ const applyLiveTree = (
   return {
     compositionTree: snapshot,
     proposedComposition: null,
+    proposedMeta: null,
     totalFrames: overrides.totalFrames ?? computeTotalFrames(snapshot),
     selectedClip: ensureSelectionExists(snapshot, overrides.selectedClip ?? state.selectedClip),
     assetPickerClip: ensureSelectionExists(snapshot, overrides.assetPickerClip ?? state.assetPickerClip),
-  }
-}
-
-const resolveTrimmedClip = (clip: Clip, newStart: number, newEnd: number): Clip => {
-  let startFrame = Math.max(0, Math.min(newStart, newEnd))
-  let endFrame = Math.max(startFrame, newEnd)
-
-  if (
-    clip.mediaType &&
-    clip.mediaType !== 'text' &&
-    clip.mediaStart != null &&
-    clip.mediaEnd != null
-  ) {
-    const minStart = Math.max(0, clip.startFrame - clip.mediaStart)
-    startFrame = Math.max(minStart, Math.min(startFrame, endFrame))
-
-    let mediaStart = clip.mediaStart + (startFrame - clip.startFrame)
-
-    const maxEnd = clip.mediaDurationFrames != null
-      ? clip.endFrame + Math.max(clip.mediaDurationFrames - 1 - clip.mediaEnd, 0)
-      : Number.MAX_SAFE_INTEGER
-
-    endFrame = Math.max(startFrame, Math.min(endFrame, maxEnd))
-    let mediaEnd = clip.mediaEnd + (endFrame - clip.endFrame)
-
-    if (clip.mediaDurationFrames != null) {
-      mediaEnd = Math.min(mediaEnd, clip.mediaDurationFrames - 1)
-    }
-
-    mediaStart = Math.max(0, mediaStart)
-    mediaEnd = Math.max(mediaStart, mediaEnd)
-
-    return {
-      ...clip,
-      startFrame,
-      endFrame,
-      mediaStart,
-      mediaEnd,
-    }
-  }
-
-  return {
-    ...clip,
-    startFrame,
-    endFrame,
   }
 }
 
@@ -264,12 +236,17 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
   compositionTree: INITIAL_SNAPSHOT,
   proposedComposition: null,
+  proposedMeta: null,
 
   history: [INITIAL_SNAPSHOT],
   historyIndex: 0,
 
   setPlayheadPosition: (frame) =>
-    set((state) => ({ playheadPosition: Math.max(0, Math.min(frame, state.totalFrames - 1)) })),
+    set((state) => {
+      if (!Number.isFinite(frame)) return state
+      const clamped = Math.max(0, Math.min(Math.round(frame), Math.max(0, state.totalFrames - 1)))
+      return clamped === state.playheadPosition ? state : { playheadPosition: clamped }
+    }),
 
   setSelection: (currentSelection) => set({ currentSelection }),
   setSelectedClip: (selectedClip) =>
@@ -285,15 +262,35 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   openPrompt: () => set({ isPromptOpen: true }),
   closePrompt: () => set({ isPromptOpen: false }),
 
-  setProposedComposition: (tracks) => set({ proposedComposition: cloneTracks(tracks) }),
+  setProposedComposition: (composition) =>
+    set((state) => {
+      const tracks = Array.isArray(composition) ? composition : composition.tracks
+      const snapshot = cloneTracks(tracks)
+      const totalFrames = Array.isArray(composition)
+        ? computeTotalFrames(snapshot)
+        : Math.max(composition.totalFrames ?? state.totalFrames, computeTotalFrames(snapshot))
+      const fps = Array.isArray(composition) ? state.fps : (composition.fps ?? state.fps)
+
+      return {
+        proposedComposition: snapshot,
+        proposedMeta: { totalFrames, fps },
+      }
+    }),
 
   acceptProposal: () =>
     set((state) => {
       if (!state.proposedComposition) return state
-      return applyCommittedTree(state, state.proposedComposition)
+      const nextTotalFrames = Math.max(
+        state.proposedMeta?.totalFrames ?? state.totalFrames,
+        computeTotalFrames(state.proposedComposition)
+      )
+      return applyCommittedTree(state, state.proposedComposition, {
+        totalFrames: nextTotalFrames,
+        fps: state.proposedMeta?.fps ?? state.fps,
+      })
     }),
 
-  rejectProposal: () => set({ proposedComposition: null }),
+  rejectProposal: () => set({ proposedComposition: null, proposedMeta: null }),
 
   hydrateProject: ({ tracks, totalFrames, fps }) =>
     set((state) => {
@@ -302,6 +299,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       return {
         compositionTree: snapshot,
         proposedComposition: null,
+        proposedMeta: null,
         history: [snapshot],
         historyIndex: 0,
         totalFrames: Math.max(totalFrames, computeTotalFrames(snapshot)),
@@ -337,6 +335,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         compositionTree: snapshot,
         historyIndex,
         proposedComposition: null,
+        proposedMeta: null,
         totalFrames: computeTotalFrames(snapshot),
         selectedClip: ensureSelectionExists(snapshot, state.selectedClip),
         assetPickerClip: ensureSelectionExists(snapshot, state.assetPickerClip),
@@ -353,6 +352,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
         compositionTree: snapshot,
         historyIndex,
         proposedComposition: null,
+        proposedMeta: null,
         totalFrames: computeTotalFrames(snapshot),
         selectedClip: ensureSelectionExists(snapshot, state.selectedClip),
         assetPickerClip: ensureSelectionExists(snapshot, state.assetPickerClip),
@@ -363,13 +363,33 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     const id = createId('track')
 
     set((state) =>
-      applyCommittedTree(state, [...state.compositionTree, { id, name, type, clips: [] }], {
+      applyCommittedTree(state, [...state.compositionTree, { id, name, type, muted: false, clips: [] }], {
         selectedClip: null,
       })
     )
 
     return id
   },
+
+  removeTrack: (trackId) =>
+    set((state) => {
+      if (state.compositionTree.length <= 1) return state
+      const nextTree = state.compositionTree.filter((track) => track.id !== trackId)
+      return applyCommittedTree(state, nextTree, {
+        selectedClip: state.selectedClip?.trackId === trackId ? null : state.selectedClip,
+        assetPickerClip: state.assetPickerClip?.trackId === trackId ? null : state.assetPickerClip,
+      })
+    }),
+
+  toggleTrackMute: (trackId) =>
+    set((state) =>
+      applyCommittedTree(
+        state,
+        state.compositionTree.map((track) =>
+          track.id === trackId ? { ...track, muted: !track.muted } : track
+        )
+      )
+    ),
 
   addClip: (trackId, clip) =>
     set((state) =>
@@ -473,6 +493,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
               id: trackId,
               name: trackName,
               type: trackType,
+              muted: false,
               clips: [newClip],
             },
           ]
@@ -493,7 +514,11 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
           ...track,
           clips: track.clips.map((clip) => {
             if (clip.id !== clipId) return clip
-            const timelineDurationFrames = clip.endFrame - clip.startFrame + 1
+            const timelineDurationFrames = Math.max(1, clip.endFrame - clip.startFrame + 1)
+            const nextDurationFrames =
+              asset.mediaType === 'image'
+                ? timelineDurationFrames
+                : Math.min(timelineDurationFrames, safeAssetDurationFrames)
 
             return {
               ...clip,
@@ -502,8 +527,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
               assetUrl: asset.assetUrl,
               assetId: asset.assetId,
               mediaType: asset.mediaType,
+              previewUrl: asset.previewUrl,
+              endFrame: clip.startFrame + nextDurationFrames - 1,
               mediaStart: 0,
-              mediaEnd: Math.max(0, Math.min(timelineDurationFrames, safeAssetDurationFrames) - 1),
+              mediaEnd: Math.max(0, nextDurationFrames - 1),
               mediaDurationFrames: safeAssetDurationFrames,
               isMissingAsset: false,
               status: 'ready' as const,
@@ -655,7 +682,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       })),
     })),
 
-  trimClip: (trackId, clipId, newStart, newEnd) =>
+  trimClip: (trackId, clipId, newStart, newEnd, edge) =>
     set((state) =>
       applyLiveTree(
         state,
@@ -668,7 +695,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
               clip.id === clipId
                 ? (() => {
                     // FIX: 1 - keep invalid trims from reaching the preview renderer.
-                    const trimmedClip = resolveTrimmedClip(clip, newStart, newEnd)
+                    const trimmedClip = resolveTrimmedClip(clip, newStart, newEnd, edge)
                     return validateClip(trimmedClip) ? trimmedClip : clip
                   })()
                 : clip

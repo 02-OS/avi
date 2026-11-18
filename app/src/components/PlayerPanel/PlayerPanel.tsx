@@ -2,15 +2,16 @@ import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Player, type PlayerRef } from '@remotion/player'
 import { TrackPreviewComposition, type TrackPreviewProps } from '../../remotion/compositions/TrackPreviewComposition'
 import { useEditorStore } from '../../store/useEditorStore'
-import { getProjectAssets, type Asset } from '../../lib/assetService'
+import { ensureProjectAssets, useAssetStore, type Asset } from '../../lib/assetService'
+import { useModalFocusTrap } from '../../hooks/useModalFocusTrap'
 import { toast } from '../../lib/toastStore'
 import { GhostPreviewBar } from './GhostPreviewBar'
 
 // ── Transport icon components ────────────────────────────────────────────────
-const IconPlay      = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-const IconPause     = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-const IconSkipBack  = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
-const IconSkipFwd   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zm2.5-6L14 7v10z"/><path d="M16 6h2v12h-2z"/></svg>
+const IconPlay      = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+const IconPause     = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+const IconSkipBack  = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+const IconSkipFwd   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 18l8.5-6L6 6v12zm2.5-6L14 7v10z"/><path d="M16 6h2v12h-2z"/></svg>
 
 const getActiveClipLabels = (
   tracks: TrackPreviewProps['tracks'],
@@ -28,6 +29,52 @@ const getActiveClipLabels = (
     )
   ).slice(0, 3)
 
+const ActiveClipLabelsOverlay: React.FC<{ tracks: TrackPreviewProps['tracks'] }> = React.memo(({ tracks }) => {
+  const playheadPosition = useEditorStore((s) => s.playheadPosition)
+  const labels = useMemo(
+    () => getActiveClipLabels(tracks, playheadPosition),
+    [tracks, playheadPosition]
+  )
+
+  if (labels.length === 0) return null
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: 8,
+        bottom: 8,
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 6,
+        pointerEvents: 'none',
+        maxWidth: 'calc(100% - 16px)',
+      }}
+    >
+      {labels.map((clipLabel) => (
+        <span
+          key={clipLabel}
+          style={{
+            fontSize: 10,
+            color: '#e5e7eb',
+            background: 'rgba(15,15,15,0.74)',
+            border: '1px solid rgba(99,99,99,0.45)',
+            borderRadius: 4,
+            padding: '3px 7px',
+            fontFamily: 'monospace',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {clipLabel}
+        </span>
+      ))}
+    </div>
+  )
+})
+ActiveClipLabelsOverlay.displayName = 'ActiveClipLabelsOverlay'
+
 // ── One player slot ──────────────────────────────────────────────────────────
 interface PlayerSlotProps {
   playerRef:    React.RefObject<PlayerRef | null>
@@ -36,7 +83,6 @@ interface PlayerSlotProps {
   fps:          number
   label:        string
   isProposed?:  boolean
-  activeClipLabels?: string[]
 }
 
 const formatPreviewError = (error: Error) => {
@@ -118,9 +164,21 @@ const PreviewErrorState: React.FC<{ error: Error; label: string; isProposed: boo
   </div>
 )
 
-const PlayerSlot: React.FC<PlayerSlotProps> = ({
-  playerRef, tracks, totalFrames, fps, label, isProposed = false, activeClipLabels = [],
+const PlayerSlot: React.FC<PlayerSlotProps> = React.memo(({
+  playerRef, tracks, totalFrames, fps, label, isProposed = false,
 }) => {
+  const safeTotalFrames = Math.max(1, totalFrames)
+  const inputProps = useMemo<TrackPreviewProps>(
+    () => ({ tracks, totalFrames: safeTotalFrames, isProposed }),
+    [tracks, safeTotalFrames, isProposed]
+  )
+  const errorFallback = useCallback(
+    ({ error }: { error: Error }) => (
+      <PreviewErrorState error={error} label={label} isProposed={isProposed} />
+    ),
+    [label, isProposed]
+  )
+
   return (
     <div
       style={{
@@ -159,55 +217,146 @@ const PlayerSlot: React.FC<PlayerSlotProps> = ({
         <Player
           ref={playerRef as React.RefObject<PlayerRef>}
           component={TrackPreviewComposition as unknown as React.ComponentType<Record<string, unknown>>}
-          inputProps={{ tracks, totalFrames, isProposed } satisfies TrackPreviewProps}
-          durationInFrames={totalFrames}
+          inputProps={inputProps as unknown as Record<string, unknown>}
+          durationInFrames={safeTotalFrames}
           compositionWidth={1280}
           compositionHeight={720}
           fps={fps}
           initialFrame={0}
-          errorFallback={({ error }) => (
-            <PreviewErrorState error={error} label={label} isProposed={isProposed} />
-          )}
+          initiallyMuted={isProposed}
+          errorFallback={errorFallback}
           style={{ width: '100%', height: '100%', display: 'block' }}
         />
-        {activeClipLabels.length > 0 && (
-          <div
-            style={{
-              position: 'absolute',
-              left: 8,
-              bottom: 8,
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 6,
-              pointerEvents: 'none',
-              maxWidth: 'calc(100% - 16px)',
-            }}
-          >
-            {activeClipLabels.map((clipLabel) => (
-              <span
-                key={clipLabel}
-                style={{
-                  fontSize: 10,
-                  color: '#e5e7eb',
-                  background: 'rgba(15,15,15,0.74)',
-                  border: '1px solid rgba(99,99,99,0.45)',
-                  borderRadius: 4,
-                  padding: '3px 7px',
-                  fontFamily: 'monospace',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}
-              >
-                {clipLabel}
-              </span>
-            ))}
-          </div>
-        )}
+        <ActiveClipLabelsOverlay tracks={tracks} />
       </div>
     </div>
   )
-}
+})
+PlayerSlot.displayName = 'PlayerSlot'
+
+const PlayerScrubber: React.FC<{
+  totalFrames: number
+  fps: number
+  isPlaying: boolean
+  onTogglePlay: () => void
+  onGoToStart: () => void
+  onGoToEnd: () => void
+}> = React.memo(({ totalFrames, fps, isPlaying, onTogglePlay, onGoToStart, onGoToEnd }) => {
+  const playheadPosition = useEditorStore((s) => s.playheadPosition)
+  const setPlayheadPosition = useEditorStore((s) => s.setPlayheadPosition)
+
+  const maxFrame = Math.max(1, totalFrames - 1)
+  const progressPct = totalFrames <= 1 ? '0.000' : ((playheadPosition / maxFrame) * 100).toFixed(3)
+  const currentSec = (playheadPosition / Math.max(fps, 1)).toFixed(2)
+  const totalSec = ((Math.max(1, totalFrames) - 1) / Math.max(fps, 1)).toFixed(2)
+
+  const handleScrubberClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    if (rect.width <= 0) return
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    setPlayheadPosition(totalFrames <= 1 ? 0 : Math.round(ratio * maxFrame))
+  }
+
+  const handleScrubberKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const upperBound = Math.max(0, totalFrames - 1)
+    const step = event.shiftKey ? 10 : 1
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+      event.preventDefault()
+      setPlayheadPosition(Math.max(0, playheadPosition - step))
+    } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      setPlayheadPosition(Math.min(upperBound, playheadPosition + step))
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      setPlayheadPosition(0)
+    } else if (event.key === 'End') {
+      event.preventDefault()
+      setPlayheadPosition(upperBound)
+    } else if (event.key === 'PageUp') {
+      event.preventDefault()
+      setPlayheadPosition(Math.min(upperBound, playheadPosition + fps))
+    } else if (event.key === 'PageDown') {
+      event.preventDefault()
+      setPlayheadPosition(Math.max(0, playheadPosition - fps))
+    }
+  }
+
+  return (
+    <>
+      {/* ── Scrubber ── */}
+      <div style={{ padding: '8px 16px 0' }}>
+        <div
+          role="slider"
+          tabIndex={0}
+          aria-label="Timeline playhead"
+          aria-valuemin={0}
+          aria-valuemax={Math.max(0, totalFrames - 1)}
+          aria-valuenow={playheadPosition}
+          aria-valuetext={`Frame ${playheadPosition}, ${currentSec} seconds`}
+          onClick={handleScrubberClick}
+          onKeyDown={handleScrubberKeyDown}
+          style={{
+            height: 6,
+            background: '#2a2a2a',
+            borderRadius: 3,
+            cursor: 'pointer',
+            position: 'relative',
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute', left: 0, top: 0, height: '100%',
+              width: `${progressPct}%`, background: '#e94560', borderRadius: 3, pointerEvents: 'none',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute', top: '50%', left: `${progressPct}%`,
+              transform: 'translate(-50%,-50%)', width: 12, height: 12,
+              borderRadius: '50%', background: '#e94560', pointerEvents: 'none',
+              boxShadow: '0 0 0 2px rgba(233,69,96,0.35)',
+            }}
+          />
+        </div>
+      </div>
+
+      {/* ── Transport ── */}
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 16px 12px', flexShrink: 0,
+        }}
+      >
+        <button onClick={onGoToStart} style={btnStyle} title="Go to start" aria-label="Go to start">
+          <IconSkipBack />
+        </button>
+        <button
+          onClick={onTogglePlay}
+          style={{ ...btnStyle, background: '#e94560', color: '#fff', width: 36, height: 36 }}
+          title={isPlaying ? 'Pause' : 'Play'}
+          aria-label={isPlaying ? 'Pause' : 'Play'}
+        >
+          {isPlaying ? <IconPause /> : <IconPlay />}
+        </button>
+        <button onClick={onGoToEnd} style={btnStyle} title="Go to end" aria-label="Go to end">
+          <IconSkipFwd />
+        </button>
+
+        <div
+          style={{
+            marginLeft: 'auto', fontFamily: 'monospace', fontSize: 12, color: '#aaa',
+            background: '#1a1a1a', padding: '4px 10px', borderRadius: 4, border: '1px solid #2e2e2e',
+          }}
+        >
+          <span style={{ color: '#e94560' }}>{currentSec}s</span>
+          &nbsp;/&nbsp;{totalSec}s&nbsp;&nbsp;
+          <span style={{ color: '#555' }}>f{playheadPosition}</span>
+        </div>
+      </div>
+    </>
+  )
+})
+PlayerScrubber.displayName = 'PlayerScrubber'
 
 interface PlayerPanelProps {
   projectId: string | null
@@ -217,25 +366,24 @@ interface PlayerPanelProps {
 export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
   const mainRef     = useRef<PlayerRef>(null)
   const proposedRef = useRef<PlayerRef>(null)
-  const fromPlayer  = useRef(false)
+  const playerDrivenFrameRef = useRef<number | null>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
-  const [pickerAssets, setPickerAssets] = useState<Asset[]>([])
   const [isPickerAssetsLoading, setIsPickerAssetsLoading] = useState(false)
   const [comparisonMode, setComparisonMode] = useState(false)
 
-  const {
-    playheadPosition,
-    totalFrames,
-    fps,
-    isPlaying,
-    compositionTree,
-    proposedComposition,
-    assetPickerClip,
-    replaceClipAsset,
-    closeAssetPicker,
-    setPlayheadPosition,
-    setIsPlaying,
-  } = useEditorStore()
+  const totalFrames         = useEditorStore((s) => s.totalFrames)
+  const fps                 = useEditorStore((s) => s.fps)
+  const isPlaying           = useEditorStore((s) => s.isPlaying)
+  const compositionTree     = useEditorStore((s) => s.compositionTree)
+  const proposedComposition = useEditorStore((s) => s.proposedComposition)
+  const proposedMeta        = useEditorStore((s) => s.proposedMeta)
+  const assetPickerClip     = useEditorStore((s) => s.assetPickerClip)
+  const replaceClipAsset    = useEditorStore((s) => s.replaceClipAsset)
+  const closeAssetPicker    = useEditorStore((s) => s.closeAssetPicker)
+  const setPlayheadPosition = useEditorStore((s) => s.setPlayheadPosition)
+  const setIsPlaying        = useEditorStore((s) => s.setIsPlaying)
+
+  const cachedAssets = useAssetStore((s) => s.assets)
 
   const pickerClipData = useMemo(() => {
     if (!assetPickerClip) return null
@@ -244,7 +392,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
   }, [assetPickerClip, compositionTree])
 
   const pickerAssetOptions = useMemo(() => {
-    const readyAssets = pickerAssets.filter((asset) => asset.status === 'ready' && Boolean(asset.playback_url))
+    const readyAssets = cachedAssets.filter((asset) => asset.status === 'ready' && Boolean(asset.playback_url))
     if (!pickerClipData) return readyAssets
 
     if (pickerClipData.mediaType === 'video' || pickerClipData.mediaType === 'audio' || pickerClipData.mediaType === 'image') {
@@ -252,40 +400,50 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
     }
 
     return readyAssets
-  }, [pickerAssets, pickerClipData])
+  }, [cachedAssets, pickerClipData])
 
   useEffect(() => {
-    if (!proposedComposition) {
-      setComparisonMode(false)
-    }
+    setComparisonMode(Boolean(proposedComposition))
   }, [proposedComposition])
-
-  const originalClipLabels = useMemo(
-    () => getActiveClipLabels(compositionTree, playheadPosition),
-    [compositionTree, playheadPosition]
-  )
-  const proposedClipLabels = useMemo(
-    () => (proposedComposition ? getActiveClipLabels(proposedComposition, playheadPosition) : []),
-    [proposedComposition, playheadPosition]
-  )
 
   const hasComparisonSource = Boolean(proposedComposition)
   const isSplit = hasComparisonSource && comparisonMode
 
-  // ── Seek both players when store playheadPosition changes ─────────────────
+  // ── Seek both players when store playheadPosition changes externally ───────
   useEffect(() => {
-    if (fromPlayer.current) { fromPlayer.current = false; return }
-    mainRef.current?.seekTo(playheadPosition)
-    if (isSplit) {
-      proposedRef.current?.seekTo(playheadPosition)
+    const syncSeek = (frame: number) => {
+      if (playerDrivenFrameRef.current === frame) {
+        playerDrivenFrameRef.current = null
+        return
+      }
+      playerDrivenFrameRef.current = null
+      mainRef.current?.seekTo(frame)
+      if (isSplit) {
+        proposedRef.current?.seekTo(frame)
+      }
     }
-  }, [playheadPosition, isSplit])
+
+    const unsubscribe = useEditorStore.subscribe((state, prevState) => {
+      if (state.playheadPosition !== prevState.playheadPosition) {
+        syncSeek(state.playheadPosition)
+      }
+    })
+
+    // Sync proposed player immediately when split view opens.
+    if (isSplit) {
+      proposedRef.current?.mute()
+      proposedRef.current?.seekTo(useEditorStore.getState().playheadPosition)
+    }
+
+    return unsubscribe
+  }, [isSplit])
 
   // ── Play / pause both players ─────────────────────────────────────────────
   useEffect(() => {
     if (isPlaying) {
       mainRef.current?.play()
       if (isSplit) {
+        proposedRef.current?.mute()
         proposedRef.current?.play()
       }
     } else {
@@ -296,16 +454,26 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
     }
   }, [isPlaying, isSplit])
 
-  // ── Primary player timeupdate → update store + keep secondary in sync ─────
+  // ── Primary player timeupdate → update store + drift-correct secondary ───
   useEffect(() => {
     const player = mainRef.current
     if (!player) return
 
     const onTimeUpdate = ({ detail }: { detail: { frame: number } }) => {
-      fromPlayer.current = true
-      setPlayheadPosition(detail.frame)
-      if (isSplit) {
-        proposedRef.current?.seekTo(detail.frame)   // keep secondary locked in
+      const state = useEditorStore.getState()
+      const maxFrame = Math.max(0, state.totalFrames - 1)
+      const clamped = Math.max(0, Math.min(Math.round(detail.frame), maxFrame))
+
+      if (clamped !== state.playheadPosition) {
+        playerDrivenFrameRef.current = clamped
+        setPlayheadPosition(clamped)
+      }
+
+      if (isSplit && proposedRef.current) {
+        const proposedFrame = proposedRef.current.getCurrentFrame()
+        if (!Number.isFinite(proposedFrame) || Math.abs(proposedFrame - clamped) > 2) {
+          proposedRef.current.seekTo(clamped)
+        }
       }
     }
     const onPlay  = () => setIsPlaying(true)
@@ -326,7 +494,6 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
 
   useEffect(() => {
     if (!assetPickerClip || !projectId) {
-      setPickerAssets([])
       setIsPickerAssetsLoading(false)
       return
     }
@@ -334,19 +501,16 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
     let cancelled = false
     setIsPickerAssetsLoading(true)
 
-    getProjectAssets(projectId)
-      .then((assets) => {
-        if (cancelled) return
-        setPickerAssets(assets)
-      })
+    ensureProjectAssets(projectId)
       .catch((error) => {
         if (cancelled) return
         console.error('Failed to load assets for replacement picker:', error)
         toast.error('Failed to load assets for replacement')
       })
       .finally(() => {
-        if (cancelled) return
-        setIsPickerAssetsLoading(false)
+        if (!cancelled) {
+          setIsPickerAssetsLoading(false)
+        }
       })
 
     return () => {
@@ -359,47 +523,21 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
     closeAssetPicker()
   }, [assetPickerClip, closeAssetPicker, pickerClipData])
 
-  useEffect(() => {
-    if (!assetPickerClip) return
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        // FIX: BUG-A - allow Esc to always dismiss the asset replacement picker.
-        closeAssetPicker()
-      }
-    }
-
-    document.addEventListener('keydown', handleEscape)
-    return () => {
-      document.removeEventListener('keydown', handleEscape)
-    }
-  }, [assetPickerClip, closeAssetPicker])
+  useModalFocusTrap(Boolean(assetPickerClip), pickerRef, closeAssetPicker)
 
   useEffect(() => {
     return () => {
-      // FIX: BUG-A - reset picker state if the player panel unmounts.
       closeAssetPicker()
     }
   }, [closeAssetPicker])
 
-  const goToStart  = () => { setIsPlaying(false); setPlayheadPosition(0) }
-  const goToEnd    = () => { setIsPlaying(false); setPlayheadPosition(totalFrames - 1) }
-  const togglePlay = () => setIsPlaying(!isPlaying)
-
-  const progressPct = ((playheadPosition / (totalFrames - 1)) * 100).toFixed(3)
-  const currentSec  = (playheadPosition / fps).toFixed(2)
-  const totalSec    = ((totalFrames - 1) / fps).toFixed(2)
-
-  const handleScrubberClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect  = e.currentTarget.getBoundingClientRect()
-    const ratio = (e.clientX - rect.left) / rect.width
-    setPlayheadPosition(Math.round(ratio * (totalFrames - 1)))
-  }
+  const goToStart  = useCallback(() => { setIsPlaying(false); setPlayheadPosition(0) }, [setIsPlaying, setPlayheadPosition])
+  const goToEnd    = useCallback(() => { setIsPlaying(false); setPlayheadPosition(Math.max(0, totalFrames - 1)) }, [setIsPlaying, setPlayheadPosition, totalFrames])
+  const togglePlay = useCallback(() => setIsPlaying(!isPlaying), [setIsPlaying, isPlaying])
 
   const handlePreviewAreaMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!assetPickerClip) return
     if (pickerRef.current && pickerRef.current.contains(event.target as Node)) return
-    // FIX: BUG-A - clicking the preview area dismisses the picker.
     closeAssetPicker()
   }
 
@@ -417,9 +555,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
       mediaType: asset.file_type,
       label: asset.name,
       durationFrames,
+      previewUrl: asset.preview_url ?? undefined,
     })
 
-    // FIX: BUG-A - selecting any asset from the picker always closes it.
     closeAssetPicker()
   }, [assetPickerClip, pickerClipData, fps, replaceClipAsset, closeAssetPicker])
 
@@ -438,7 +576,6 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
       {assetPickerClip && (
         <>
           <div
-            // FIX: BUG-A - backdrop catches click-outside and keeps layering below active picker content.
             onMouseDown={closeAssetPicker}
             style={{
               position: 'fixed',
@@ -450,6 +587,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
 
           <div
             ref={pickerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="asset-picker-title"
+            tabIndex={-1}
             style={{
               position: 'fixed',
               top: 86,
@@ -474,7 +615,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
                 gap: 8,
               }}
             >
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#b8b8b8', letterSpacing: 0.6 }}>
+              <span
+                id="asset-picker-title"
+                style={{ fontSize: 11, fontWeight: 700, color: '#b8b8b8', letterSpacing: 0.6 }}
+              >
                 REPLACE CLIP ASSET
               </span>
               <span style={{ marginLeft: 'auto', fontSize: 11, color: '#666' }}>
@@ -482,6 +626,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
               </span>
               <button
                 onClick={closeAssetPicker}
+                aria-label="Close asset picker"
                 style={{
                   background: 'none',
                   border: 'none',
@@ -541,6 +686,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
         >
           <button
             onClick={() => setComparisonMode((enabled) => !enabled)}
+            aria-pressed={comparisonMode}
             style={{
               borderRadius: 6,
               border: comparisonMode ? '1px solid rgba(99,160,255,0.6)' : '1px solid #3a3a3a',
@@ -578,7 +724,6 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
           fps={fps}
           label="ORIGINAL"
           isProposed={false}
-          activeClipLabels={originalClipLabels}
         />
 
         {/* AI Preview (only when proposedComposition is set) */}
@@ -586,11 +731,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
           <PlayerSlot
             playerRef={proposedRef}
             tracks={proposedComposition!}
-            totalFrames={totalFrames}
-            fps={fps}
+            totalFrames={proposedMeta?.totalFrames ?? totalFrames}
+            fps={proposedMeta?.fps ?? fps}
             label="AI PREVIEW"
             isProposed
-            activeClipLabels={proposedClipLabels}
           />
         )}
       </div>
@@ -598,63 +742,14 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({ projectId }) => {
       {/* ── Ghost preview accept/reject bar ── */}
       <GhostPreviewBar />
 
-      {/* ── Scrubber ── */}
-      <div style={{ padding: '8px 16px 0' }}>
-        <div
-          onClick={handleScrubberClick}
-          style={{
-            height: 6,
-            background: '#2a2a2a',
-            borderRadius: 3,
-            cursor: 'pointer',
-            position: 'relative',
-          }}
-        >
-          <div
-            style={{
-              position: 'absolute', left: 0, top: 0, height: '100%',
-              width: `${progressPct}%`, background: '#e94560', borderRadius: 3, pointerEvents: 'none',
-            }}
-          />
-          <div
-            style={{
-              position: 'absolute', top: '50%', left: `${progressPct}%`,
-              transform: 'translate(-50%,-50%)', width: 12, height: 12,
-              borderRadius: '50%', background: '#e94560', pointerEvents: 'none',
-              boxShadow: '0 0 0 2px rgba(233,69,96,0.35)',
-            }}
-          />
-        </div>
-      </div>
-
-      {/* ── Transport ── */}
-      <div
-        style={{
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '8px 16px 12px', flexShrink: 0,
-        }}
-      >
-        <button onClick={goToStart} style={btnStyle} title="Go to start"><IconSkipBack /></button>
-        <button
-          onClick={togglePlay}
-          style={{ ...btnStyle, background: '#e94560', color: '#fff', width: 36, height: 36 }}
-          title={isPlaying ? 'Pause' : 'Play'}
-        >
-          {isPlaying ? <IconPause /> : <IconPlay />}
-        </button>
-        <button onClick={goToEnd} style={btnStyle} title="Go to end"><IconSkipFwd /></button>
-
-        <div
-          style={{
-            marginLeft: 'auto', fontFamily: 'monospace', fontSize: 12, color: '#aaa',
-            background: '#1a1a1a', padding: '4px 10px', borderRadius: 4, border: '1px solid #2e2e2e',
-          }}
-        >
-          <span style={{ color: '#e94560' }}>{currentSec}s</span>
-          &nbsp;/&nbsp;{totalSec}s&nbsp;&nbsp;
-          <span style={{ color: '#555' }}>f{playheadPosition}</span>
-        </div>
-      </div>
+      <PlayerScrubber
+        totalFrames={totalFrames}
+        fps={fps}
+        isPlaying={isPlaying}
+        onTogglePlay={togglePlay}
+        onGoToStart={goToStart}
+        onGoToEnd={goToEnd}
+      />
     </div>
   )
 }

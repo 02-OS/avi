@@ -1,8 +1,9 @@
 // Cloud auth is optional. Without these variables the editor runs locally.
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
+const env = typeof import.meta !== 'undefined' ? (import.meta.env as Record<string, string | undefined> | undefined) : undefined
+const supabaseUrl = env?.VITE_SUPABASE_URL
+const supabaseAnonKey = env?.VITE_SUPABASE_ANON_KEY
 
 export const supabase: SupabaseClient | null =
   supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null

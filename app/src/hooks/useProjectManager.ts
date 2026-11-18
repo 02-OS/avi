@@ -1,8 +1,16 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useEditorStore } from '../store/useEditorStore'
 import { useAuth } from '../lib/authContext'
-import { createProject, getProject, updateProjectComposition, createAutoSave } from '../lib/projectService'
-import { resolveTracksWithAssets } from '../lib/assetService'
+import {
+  createProject,
+  deleteProject,
+  getProject,
+  updateProjectComposition,
+  updateProjectMetadata,
+  createAutoSave,
+  type Project,
+} from '../lib/projectService'
+import { loadProjectAssetsIntoStore, migrateProjectAssets, resolveTracksWithAssets } from '../lib/assetService'
 import { normalizeTimeline, repairTracks } from '../lib/clipValidation'
 import { LOCAL_PROJECT_ID, readLocalProject, writeLocalProject } from '../lib/localProject'
 import { toast } from '../lib/toastStore'
@@ -16,31 +24,74 @@ export function useProjectManager() {
 
   const projectIdRef = useRef<string | null>(null)
   const [projectId, setProjectId] = useState<string | null>(null)
+  const [projectName, setProjectName] = useState<string>('Untitled Project')
   const [projectStatus, setProjectStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [projectError, setProjectError] = useState<string | null>(null)
   const autoSaveRef = useRef(createAutoSave(3000))
   const isInitializingRef = useRef(false)
   const isInitialized = useRef(false)
   const initInFlightRef = useRef(false)
+  const hasUnsavedChangesRef = useRef(false)
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+
+  const setHasUnsavedChangesSync = useCallback((value: boolean) => {
+    hasUnsavedChangesRef.current = value
+    setHasUnsavedChanges(value)
+  }, [])
 
   const updateProjectId = useCallback((id: string) => {
     projectIdRef.current = id
     setProjectId(id)
   }, [])
 
-  const finishReady = useCallback((id: string) => {
+  const finishReady = useCallback((id: string, name = 'Untitled Project') => {
     updateProjectId(id)
-    setHasUnsavedChanges(false)
+    setProjectName(name)
+    setHasUnsavedChangesSync(false)
     setProjectStatus('ready')
     isInitialized.current = true
-  }, [updateProjectId])
+  }, [setHasUnsavedChangesSync, updateProjectId])
+
+  const hydrateLoadedProject = useCallback(async (project: Project, cancelled: { value: boolean }) => {
+    const resolvedTracks = await resolveTracksWithAssets(project.composition_tree || [], project.fps)
+    if (cancelled.value) return
+
+    const repairedTimeline = repairTracks(resolvedTracks)
+    const normalizedTimeline = normalizeTimeline(repairedTimeline.tracks)
+
+    const missingCount = normalizedTimeline.tracks
+      .flatMap((track) => track.clips)
+      .filter((clip) => clip.assetId && clip.isMissingAsset)
+      .length
+
+    updateProjectId(project.id)
+    setProjectName(project.name || 'Untitled Project')
+    hydrateProject({
+      tracks: normalizedTimeline.tracks,
+      totalFrames: Math.max(0, project.total_frames - normalizedTimeline.offsetFrames),
+      fps: project.fps,
+    })
+    localStorage.setItem('currentProjectId', project.id)
+    setHasUnsavedChangesSync(false)
+    setProjectStatus('ready')
+    isInitialized.current = true
+    void loadProjectAssetsIntoStore(project.id)
+
+    if (missingCount > 0) {
+      toast.warning(`${missingCount} media file${missingCount === 1 ? '' : 's'} missing from local storage. Re-upload from Assets to restore playback.`)
+    }
+
+    if (repairedTimeline.removedCount > 0 || repairedTimeline.repairedCount > 0) {
+      toast.info('Timeline repaired on load.')
+    }
+  }, [hydrateProject, setHasUnsavedChangesSync, updateProjectId])
 
   const initializeLocal = useCallback(async (cancelled: { value: boolean }) => {
     if (initInFlightRef.current) return
     initInFlightRef.current = true
     isInitializingRef.current = true
     isInitialized.current = false
+    autoSaveRef.current.cancel()
     setProjectStatus('loading')
     setProjectError(null)
 
@@ -53,12 +104,13 @@ export function useProjectManager() {
 
       const repairedTimeline = repairTracks(resolvedTracks)
       const normalizedTimeline = normalizeTimeline(repairedTimeline.tracks)
-      finishReady(LOCAL_PROJECT_ID)
+      finishReady(LOCAL_PROJECT_ID, 'Local Project')
       hydrateProject({
         tracks: normalizedTimeline.tracks,
         totalFrames: Math.max(0, (saved?.totalFrames ?? editorState.totalFrames) - normalizedTimeline.offsetFrames),
         fps: fpsValue,
       })
+      void loadProjectAssetsIntoStore(LOCAL_PROJECT_ID)
 
       const missingCount = normalizedTimeline.tracks
         .flatMap((track) => track.clips)
@@ -86,6 +138,7 @@ export function useProjectManager() {
     initInFlightRef.current = true
     isInitializingRef.current = true
     isInitialized.current = false
+    autoSaveRef.current.cancel()
     setProjectStatus('loading')
     setProjectError(null)
 
@@ -98,7 +151,11 @@ export function useProjectManager() {
       return
     }
 
-    const createFreshProject = async (editorState: { compositionTree: ReturnType<typeof useEditorStore.getState>['compositionTree']; totalFrames: number; fps: number }) => {
+    const createFreshProject = async (editorState: {
+      compositionTree: ReturnType<typeof useEditorStore.getState>['compositionTree']
+      totalFrames: number
+      fps: number
+    }, migrateLocalAssets: boolean) => {
       const project = await createProject({
         composition_tree: editorState.compositionTree,
         total_frames: editorState.totalFrames,
@@ -107,11 +164,17 @@ export function useProjectManager() {
 
       if (cancelled.value) return
 
+      if (migrateLocalAssets) {
+        await migrateProjectAssets(LOCAL_PROJECT_ID, project.id)
+      }
+
       updateProjectId(project.id)
+      setProjectName(project.name || 'Untitled Project')
       localStorage.setItem('currentProjectId', project.id)
-      setHasUnsavedChanges(false)
+      setHasUnsavedChangesSync(false)
       setProjectStatus('ready')
       isInitialized.current = true
+      void loadProjectAssetsIntoStore(project.id)
     }
 
     try {
@@ -122,70 +185,39 @@ export function useProjectManager() {
           compositionTree: editorState.compositionTree,
           totalFrames: editorState.totalFrames,
           fps: editorState.fps,
-        })
+        }, true)
         return
       }
 
       const savedProjectId = localStorage.getItem('currentProjectId')
 
       if (!savedProjectId) {
-        const editorState = useEditorStore.getState()
-        await createFreshProject({ compositionTree: editorState.compositionTree, totalFrames: editorState.totalFrames, fps: editorState.fps })
+        const freshState = useEditorStore.getState()
+        await createFreshProject({
+          compositionTree: freshState.compositionTree,
+          totalFrames: freshState.totalFrames,
+          fps: freshState.fps,
+        }, false)
         return
       }
 
-      let project = null
-      try {
-        project = await getProject(savedProjectId)
-      } catch {
-        localStorage.removeItem('currentProjectId')
-        const editorState = useEditorStore.getState()
-        await createFreshProject({ compositionTree: editorState.compositionTree, totalFrames: editorState.totalFrames, fps: editorState.fps })
-        return
-      }
+      // Only clear currentProjectId when the project is confirmed missing (getProject returns null).
+      const project = await getProject(savedProjectId)
 
       if (!project) {
         localStorage.removeItem('currentProjectId')
-        const editorState = useEditorStore.getState()
-        await createFreshProject({ compositionTree: editorState.compositionTree, totalFrames: editorState.totalFrames, fps: editorState.fps })
+        const freshState = useEditorStore.getState()
+        await createFreshProject({
+          compositionTree: freshState.compositionTree,
+          totalFrames: freshState.totalFrames,
+          fps: freshState.fps,
+        }, false)
         return
       }
 
-      const resolvedTracks = await resolveTracksWithAssets(project.composition_tree || [], project.fps)
-      if (cancelled.value) return
-
-      // FIX: 3 - repair and normalize reloaded timelines so playback and viewport restart at frame 0.
-      const repairedTimeline = repairTracks(resolvedTracks)
-      const normalizedTimeline = normalizeTimeline(repairedTimeline.tracks)
-
-      const missingCount = normalizedTimeline.tracks
-        .flatMap((track) => track.clips)
-        .filter((clip) => clip.assetId && clip.isMissingAsset)
-        .length
-
-      updateProjectId(project.id)
-      hydrateProject({
-        tracks: normalizedTimeline.tracks,
-        totalFrames: Math.max(0, project.total_frames - normalizedTimeline.offsetFrames),
-        fps: project.fps,
-      })
-      localStorage.setItem('currentProjectId', project.id)
-      setHasUnsavedChanges(false)
-      setProjectStatus('ready')
-
-      if (missingCount > 0) {
-        // FIX: 2 - prompt the user to re-upload any asset that is missing locally after reload.
-        toast.warning(`${missingCount} media file${missingCount === 1 ? '' : 's'} missing from local storage. Re-upload from Assets to restore playback.`)
-      }
-
-      if (repairedTimeline.removedCount > 0 || repairedTimeline.repairedCount > 0 || normalizedTimeline.offsetFrames !== 0) {
-        toast.info(
-          `Timeline repaired on load${normalizedTimeline.offsetFrames !== 0 ? ` and shifted by ${normalizedTimeline.offsetFrames} frame${normalizedTimeline.offsetFrames === 1 ? '' : 's'}` : ''}.`
-        )
-      }
+      await hydrateLoadedProject(project, cancelled)
     } catch (error) {
       console.error('Project initialization failed:', error)
-      localStorage.removeItem('currentProjectId')
 
       if (!cancelled.value) {
         const message =
@@ -200,7 +232,7 @@ export function useProjectManager() {
         isInitializingRef.current = false
       }
     }
-  }, [user, hydrateProject, updateProjectId])
+  }, [hydrateLoadedProject, setHasUnsavedChangesSync, updateProjectId, user])
 
   useEffect(() => {
     if (authLoading) return
@@ -214,6 +246,7 @@ export function useProjectManager() {
 
     return () => {
       cancelled.value = true
+      autoSaveRef.current.cancel()
     }
   }, [user, authLoading, initializeProject, initializeLocal])
 
@@ -237,22 +270,32 @@ export function useProjectManager() {
 
     if (!user) {
       writeLocalProject({ tracks: compositionTree, totalFrames, fps })
-      setHasUnsavedChanges(false)
+      setHasUnsavedChangesSync(false)
       return
     }
 
+    const activeProjectId = projectIdRef.current
+    setHasUnsavedChangesSync(true)
+
     autoSaveRef.current.schedule(async () => {
+      const state = useEditorStore.getState()
       try {
-        await updateProjectComposition(projectIdRef.current!, compositionTree, totalFrames, fps)
-        setHasUnsavedChanges(false)
+        await updateProjectComposition(
+          activeProjectId,
+          state.compositionTree,
+          state.totalFrames,
+          state.fps
+        )
+        if (projectIdRef.current === activeProjectId) {
+          setHasUnsavedChangesSync(false)
+        }
       } catch (error) {
         console.error('Auto-save failed:', error)
         toast.error('Failed to auto-save. Please use the Save button.')
+        throw error
       }
     })
-
-    setHasUnsavedChanges(true)
-  }, [authLoading, compositionTree, totalFrames, fps, user])
+  }, [authLoading, compositionTree, totalFrames, fps, setHasUnsavedChangesSync, user])
 
   const forceSave = useCallback(async () => {
     if (!user) {
@@ -262,26 +305,121 @@ export function useProjectManager() {
         totalFrames: state.totalFrames,
         fps: state.fps,
       })
-      setHasUnsavedChanges(false)
+      setHasUnsavedChangesSync(false)
       return
     }
 
-    if (!projectIdRef.current) return
+    if (!projectIdRef.current) {
+      throw new Error('No active project to save')
+    }
 
-    await autoSaveRef.current.flush()
-    setHasUnsavedChanges(false)
-  }, [user])
+    const flushed = await autoSaveRef.current.flush()
+    if (!flushed || hasUnsavedChangesRef.current) {
+      const state = useEditorStore.getState()
+      await updateProjectComposition(
+        projectIdRef.current,
+        state.compositionTree,
+        state.totalFrames,
+        state.fps
+      )
+      autoSaveRef.current.cancel()
+      setHasUnsavedChangesSync(false)
+    }
+  }, [setHasUnsavedChangesSync, user])
+
+  const switchProject = useCallback(async (targetProjectId: string) => {
+    if (!user) return
+    if (targetProjectId === projectIdRef.current) return
+
+    if (hasUnsavedChangesRef.current && projectIdRef.current) {
+      await forceSave()
+    }
+    autoSaveRef.current.cancel()
+
+    isInitializingRef.current = true
+    setProjectStatus('loading')
+    try {
+      const project = await getProject(targetProjectId)
+      if (!project) {
+        toast.error('Project could not be found.')
+        setProjectStatus('ready')
+        return
+      }
+      await hydrateLoadedProject(project, { value: false })
+      toast.success(`Switched to "${project.name}"`)
+    } finally {
+      isInitializingRef.current = false
+    }
+  }, [forceSave, hydrateLoadedProject, user])
+
+  const createNewCloudProject = useCallback(async (name: string) => {
+    if (!user) return
+
+    if (hasUnsavedChangesRef.current && projectIdRef.current) {
+      await forceSave()
+    }
+    autoSaveRef.current.cancel()
+
+    isInitializingRef.current = true
+    try {
+      const project = await createProject({
+        name: name.trim() || 'Untitled Project',
+        fps: 30,
+        total_frames: 150,
+        composition_tree: [],
+      })
+      await hydrateLoadedProject(project, { value: false })
+      toast.success(`Created "${project.name}"`)
+    } finally {
+      isInitializingRef.current = false
+    }
+  }, [forceSave, hydrateLoadedProject, user])
+
+  const renameProjectById = useCallback(async (targetProjectId: string, name: string) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    await updateProjectMetadata(targetProjectId, { name: trimmed })
+    if (projectIdRef.current === targetProjectId) {
+      setProjectName(trimmed)
+    }
+    toast.success(`Renamed project to "${trimmed}"`)
+  }, [])
+
+  const deleteProjectById = useCallback(async (targetProjectId: string) => {
+    await deleteProject(targetProjectId)
+    if (projectIdRef.current === targetProjectId) {
+      localStorage.removeItem('currentProjectId')
+      autoSaveRef.current.cancel()
+      await initializeProject({ value: false })
+    }
+    toast.success('Project deleted')
+  }, [initializeProject])
 
   useEffect(() => {
     const handleReconnect = () => {
-      if (projectIdRef.current && user) {
-        autoSaveRef.current.flush().catch(console.error)
-      }
+      if (!projectIdRef.current || !user) return
+      void (async () => {
+        const flushed = await autoSaveRef.current.flush()
+        if (!flushed || hasUnsavedChangesRef.current) {
+          const state = useEditorStore.getState()
+          await updateProjectComposition(
+            projectIdRef.current!,
+            state.compositionTree,
+            state.totalFrames,
+            state.fps
+          )
+          autoSaveRef.current.cancel()
+          setHasUnsavedChangesSync(false)
+        }
+      })().catch((err) => {
+        console.error('Reconnect save failed:', err)
+        toast.error('Reconnect sync failed. Please use the Save button.')
+      })
     }
 
     window.addEventListener('avi:reconnect', handleReconnect)
     return () => window.removeEventListener('avi:reconnect', handleReconnect)
-  }, [user])
+  }, [setHasUnsavedChangesSync, user])
 
   useEffect(() => {
     if (!hasUnsavedChanges) return
@@ -296,10 +434,15 @@ export function useProjectManager() {
 
   return {
     projectId,
+    projectName,
     projectStatus,
     projectError,
     retryProjectInit,
     forceSave,
     hasUnsavedChanges,
+    switchProject,
+    createNewCloudProject,
+    renameProjectById,
+    deleteProjectById,
   }
 }

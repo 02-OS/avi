@@ -22,8 +22,10 @@ export function useOnlineStatus() {
 
     const handleOffline = () => {
       setIsOnline(false)
-      offlineToastId = 'offline-warning'
-      toast.warning('You are offline. Changes will be saved when you reconnect.', 0)
+      if (offlineToastId) {
+        removeToast(offlineToastId)
+      }
+      offlineToastId = toast.warning('You are offline. Changes will be saved when you reconnect.', 0)
     }
 
     window.addEventListener('online', handleOnline)

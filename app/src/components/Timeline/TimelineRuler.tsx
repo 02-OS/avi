@@ -1,53 +1,60 @@
-import React from 'react'
+import React, { useMemo } from 'react'
 import { PIXELS_PER_FRAME, RULER_HEIGHT } from './constants'
 
 interface Props {
   totalFrames: number
+  pixelsPerFrame?: number
   onMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void
 }
 
-export const TimelineRuler: React.FC<Props> = ({ totalFrames, onMouseDown }) => {
-  const ticks: React.ReactNode[] = []
+export const TimelineRuler: React.FC<Props> = React.memo(({
+  totalFrames,
+  pixelsPerFrame = PIXELS_PER_FRAME,
+  onMouseDown,
+}) => {
+  const ticks = useMemo(() => {
+    const step = pixelsPerFrame < 2.5 ? 30 : 10
+    const majorEvery = pixelsPerFrame < 2.5 ? 60 : 30
+    const items: React.ReactNode[] = []
 
-  for (let f = 0; f <= totalFrames; f++) {
-    const x       = f * PIXELS_PER_FRAME
-    const isMajor = f % 30 === 0
-    const isMed   = f % 10 === 0
-    if (!isMed) continue // skip single-frame ticks at default zoom
+    for (let f = 0; f <= totalFrames; f += step) {
+      const x = f * pixelsPerFrame
+      const isMajor = f % majorEvery === 0
 
-    ticks.push(
-      <React.Fragment key={f}>
-        {/* Tick mark */}
-        <div
-          style={{
-            position: 'absolute',
-            left: x,
-            bottom: 0,
-            width: 1,
-            height: isMajor ? 14 : 8,
-            background: isMajor ? '#555' : '#333',
-          }}
-        />
-        {/* Frame label — only on major ticks */}
-        {isMajor && (
-          <span
+      items.push(
+        <React.Fragment key={f}>
+          <div
             style={{
               position: 'absolute',
-              left: x + 3,
-              top: 5,
-              fontSize: 10,
-              color: '#777',
-              fontFamily: 'monospace',
-              userSelect: 'none',
-              whiteSpace: 'nowrap',
+              left: x,
+              bottom: 0,
+              width: 1,
+              height: isMajor ? 14 : 8,
+              background: isMajor ? '#555' : '#333',
             }}
-          >
-            {f}
-          </span>
-        )}
-      </React.Fragment>
-    )
-  }
+          />
+          {isMajor && (
+            <span
+              style={{
+                position: 'absolute',
+                left: x + 3,
+                top: 5,
+                fontSize: 10,
+                color: '#777',
+                fontFamily: 'monospace',
+                userSelect: 'none',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {f}
+            </span>
+          )}
+        </React.Fragment>
+      )
+    }
+
+    return items
+  }, [totalFrames, pixelsPerFrame])
 
   return (
     <div
@@ -66,4 +73,5 @@ export const TimelineRuler: React.FC<Props> = ({ totalFrames, onMouseDown }) => 
       {ticks}
     </div>
   )
-}
+})
+TimelineRuler.displayName = 'TimelineRuler'

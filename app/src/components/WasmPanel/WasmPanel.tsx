@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react'
 import { useWasm } from '../../hooks/useWasm'
+import { applyPixelFilterInPlaceSync } from '../../lib/pixelFilter'
 
 // ── Frame dimensions used for the benchmark ───────────────────────────────────
 const FRAME_W = 1280
@@ -50,32 +51,17 @@ export const WasmPanel: React.FC = () => {
     // Yield to the browser so the button state renders before we block the thread
     await new Promise<void>((r) => setTimeout(r, 0))
 
-    const frame  = makeTestFrame(FRAME_W, FRAME_H)
-    const before = parseStats(api.frame_luma_stats(frame))
-
     try {
+      const frame  = makeTestFrame(FRAME_W, FRAME_H)
+      const before = parseStats(api.frame_luma_stats(frame))
+
       const t0 = performance.now()
-      let filteredFrame: Uint8Array
-
-      switch (filter) {
-        case 'grayscale':
-          filteredFrame = api.grayscale(frame)
-          break
-        case 'invert':
-          filteredFrame = api.invert(frame)
-          break
-        case 'brightness':
-          filteredFrame = api.brightness(frame, 1.5)
-          break
-        case 'sepia':
-          filteredFrame = api.sepia(frame)
-          break
-      }
-
+      applyPixelFilterInPlaceSync(api, frame, filter)
       const timeMs = performance.now() - t0
-      const after = parseStats(api.frame_luma_stats(filteredFrame))
+
+      const after = parseStats(api.frame_luma_stats(frame))
       const pixelCount = FRAME_W * FRAME_H
-      const throughputMp = pixelCount / 1_000_000 / (timeMs / 1000)
+      const throughputMp = timeMs > 0 ? pixelCount / 1_000_000 / (timeMs / 1000) : 0
 
       console.log(`[wasm] ${filter} — ${timeMs.toFixed(2)}ms | ${throughputMp.toFixed(0)} MP/s`)
 
@@ -164,7 +150,7 @@ export const WasmPanel: React.FC = () => {
 
       {/* ── Error message ── */}
       {(error || runtimeError) && (
-        <span style={{ fontSize: 11, color: '#e94560', fontFamily: 'monospace' }}>
+        <span role="alert" style={{ fontSize: 11, color: '#e94560', fontFamily: 'monospace' }}>
           {runtimeError || error}
         </span>
       )}

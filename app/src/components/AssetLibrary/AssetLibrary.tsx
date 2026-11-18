@@ -1,13 +1,16 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useEditorStore, type Track } from '../../store/useEditorStore'
 import {
   uploadAsset,
-  getProjectAssets,
+  loadProjectAssetsIntoStore,
   deleteAsset,
   importMediaPaths,
+  detectMediaTypeFromFile,
+  useAssetStore,
   type Asset,
 } from '../../lib/assetService'
 import { isDesktopApp, pickMediaPaths } from '../../lib/desktop'
+import { MAX_BROWSER_UPLOAD_BYTES, MAX_BROWSER_UPLOAD_LABEL } from '../../lib/editorUtils'
 import { toast } from '../../lib/toastStore'
 import { Spinner } from '../Spinner/Spinner'
 
@@ -32,41 +35,40 @@ interface AssetLibraryProps {
 }
 
 export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
-  const [assets, setAssets] = useState<Asset[]>([])
-  const [loading, setLoading] = useState(false)
+  const assets = useAssetStore((s) => s.assets)
+  const loading = useAssetStore((s) => s.loading)
   const [uploading, setUploading] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const fps = useEditorStore((s) => s.fps)
   const addAssetToTrackType = useEditorStore((s) => s.addAssetToTrackType)
-  const markAssetMissing = useEditorStore((s) => s.markAssetMissing)
+  const removeAssetClips = useEditorStore((s) => s.removeAssetClips)
 
-  // ── Load assets ──────────────────────────────────────────────────────────
-  const loadAssets = useCallback(async () => {
+  useEffect(() => {
     if (!projectId) return
-    setLoading(true)
-    try {
-      const data = await getProjectAssets(projectId)
-      setAssets(data)
-    } catch (err) {
+    void loadProjectAssetsIntoStore(projectId).catch((err) => {
       console.error('Failed to load assets:', err)
-    } finally {
-      setLoading(false)
-    }
+    })
   }, [projectId])
 
   useEffect(() => {
-    loadAssets()
-  }, [loadAssets])
-
-  useEffect(() => {
+    if (!projectId) return
     const refresh = () => {
-      void loadAssets()
+      void loadProjectAssetsIntoStore(projectId).catch((err) => {
+        console.error('Failed to refresh assets:', err)
+      })
     }
     window.addEventListener('avi:assets-changed', refresh)
     return () => window.removeEventListener('avi:assets-changed', refresh)
-  }, [loadAssets])
+  }, [projectId])
+
+  // Auto-reset armed delete confirmation after 3 seconds.
+  useEffect(() => {
+    if (!confirmDelete) return
+    const timer = window.setTimeout(() => setConfirmDelete(null), 3000)
+    return () => window.clearTimeout(timer)
+  }, [confirmDelete])
 
   const importDesktopPaths = async (paths: string[]) => {
     if (!projectId) {
@@ -82,10 +84,6 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
         toast.error('Choose a video, audio, or image file.')
         return
       }
-      setAssets((prev) => {
-        const ids = new Set(imported.map((asset) => asset.id))
-        return [...imported, ...prev.filter((asset) => !ids.has(asset.id))]
-      })
       toast.success(imported.length === 1 ? `${imported[0].name} imported` : `${imported.length} files imported`)
     } catch (err) {
       console.error('Import failed:', err)
@@ -98,7 +96,6 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
   // ── Upload handler ───────────────────────────────────────────────────────
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    console.log('[AssetLibrary] Upload triggered, file:', file?.name, 'projectId:', projectId)
     if (!file) return
 
     if (!projectId) {
@@ -106,21 +103,16 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
       return
     }
 
-    // Reset input so the same file can be re-selected
     e.target.value = ''
 
-    // Validate file type
-    const isVideo = file.type.startsWith('video/')
-    const isAudio = file.type.startsWith('audio/')
-    const isImage = file.type.startsWith('image/')
-    if (!isVideo && !isAudio && !isImage) {
+    const detectedType = detectMediaTypeFromFile(file)
+    if (!detectedType) {
       toast.error('Please upload a video, audio, or image file.')
       return
     }
 
-    // Validate file size (100MB max)
-    if (file.size > 100 * 1024 * 1024) {
-      toast.error('File too large. Maximum size is 100MB.')
+    if (file.size > MAX_BROWSER_UPLOAD_BYTES) {
+      toast.error(`File too large. Maximum size is ${MAX_BROWSER_UPLOAD_LABEL}.`)
       return
     }
 
@@ -128,12 +120,11 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
     toast.info(`Uploading ${file.name}...`)
 
     try {
-      const asset = await uploadAsset({
+      await uploadAsset({
         file,
         projectId,
       })
 
-      setAssets((prev) => [asset, ...prev])
       toast.success(`${file.name} uploaded successfully!`)
     } catch (err) {
       console.error('Upload failed:', err)
@@ -152,11 +143,9 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
 
     const trackType = TRACK_TYPE_MAP[asset.file_type] || 'overlay'
 
-    // Detect duration for video/audio
     let durationFrames = fps * 5 // default 5 seconds for images
-
     if ((asset.file_type === 'video' || asset.file_type === 'audio') && asset.duration_seconds) {
-      durationFrames = Math.round(asset.duration_seconds * fps)
+      durationFrames = Math.max(1, Math.round(asset.duration_seconds * fps))
     }
 
     addAssetToTrackType(trackType, {
@@ -180,8 +169,7 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
 
     try {
       await deleteAsset(asset.id)
-      setAssets((prev) => prev.filter((a) => a.id !== asset.id))
-      markAssetMissing(asset.id)
+      removeAssetClips(asset.id)
       toast.success(`Deleted "${asset.name}"`)
     } catch (err) {
       console.error('Delete failed:', err)
@@ -253,8 +241,9 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
         <input
           ref={fileInputRef}
           type="file"
-          accept="video/*,audio/*,image/*"
+          accept="video/*,audio/*,image/*,.mkv,.mov"
           onChange={handleUpload}
+          aria-label="Upload media file"
           style={{ display: 'none' }}
         />
       </div>
@@ -330,7 +319,7 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{
                 fontSize: 12,
-                color: '#ddd',
+                color: asset.status === 'missing' ? '#fbbf24' : '#ddd',
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -339,6 +328,7 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
               </div>
               <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
                 {asset.file_type}
+                {asset.status === 'missing' && ' · missing'}
                 {asset.duration_seconds && ` · ${asset.duration_seconds.toFixed(1)}s`}
                 {asset.file_size && ` · ${(asset.file_size / 1024 / 1024).toFixed(1)}MB`}
               </div>
@@ -349,6 +339,7 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
               <button
                 onClick={() => handleAddToTimeline(asset)}
                 title="Add to timeline"
+                aria-label={`Add ${asset.name} to timeline`}
                 style={{
                   background: '#252525',
                   border: '1px solid #333',
@@ -364,6 +355,7 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
               <button
                 onClick={() => handleDelete(asset)}
                 title={confirmDelete === asset.id ? 'Click again to confirm' : 'Delete'}
+                aria-label={confirmDelete === asset.id ? `Confirm delete ${asset.name}` : `Delete ${asset.name}`}
                 style={{
                   background: confirmDelete === asset.id ? 'rgba(233,69,96,0.2)' : '#252525',
                   border: `1px solid ${confirmDelete === asset.id ? '#e94560' : '#333'}`,
@@ -374,7 +366,7 @@ export const AssetLibrary: React.FC<AssetLibraryProps> = ({ projectId }) => {
                   cursor: 'pointer',
                 }}
               >
-                🗑
+                {confirmDelete === asset.id ? 'Confirm' : '🗑'}
               </button>
             </div>
           </div>

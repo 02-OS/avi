@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useAuth } from '../../lib/authContext'
+import { useModalFocusTrap } from '../../hooks/useModalFocusTrap'
 import { ButtonSpinner } from '../Spinner/Spinner'
 
 export function AuthModal({ onClose }: { onClose?: () => void }) {
@@ -12,6 +13,9 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
   const [message, setMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [githubLoading, setGithubLoading] = useState(false)
+  const modalRef = useRef<HTMLDivElement>(null)
+
+  useModalFocusTrap(true, modalRef, onClose)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -29,7 +33,7 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
       } else {
         setMessage(isSignUp ? 'Check your email for confirmation!' : 'Welcome back!')
       }
-    } catch (err) {
+    } catch {
       setError('An unexpected error occurred')
     } finally {
       setIsLoading(false)
@@ -40,44 +44,64 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
     setError('')
     setMessage('')
     setGithubLoading(true)
-    
+
     try {
-      const { error } = await signInWithGitHub()
-      if (error) {
-        setError(error.message)
+      const { error: oauthError } = await signInWithGitHub()
+      if (oauthError) {
+        setError(oauthError.message)
         setGithubLoading(false)
       }
-      // If successful, redirect happens automatically
-    } catch (err) {
+    } catch {
       setError('Failed to connect to GitHub')
       setGithubLoading(false)
     }
   }
 
   return (
-    <div style={styles.overlay}>
-      <div style={styles.modal}>
+    <div style={styles.overlay} onClick={onClose}>
+      <div
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="auth-modal-title"
+        tabIndex={-1}
+        style={styles.modal}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close sign in dialog"
+            style={styles.closeButton}
+          >
+            ✕
+          </button>
+        )}
+
         {/* Logo and Title */}
         <div style={styles.header}>
           <div style={styles.logo}>
-            <span style={styles.logoIcon}>✦</span>
+            <span style={styles.logoIcon} aria-hidden="true">✦</span>
             <span style={styles.logoText}>avi</span>
           </div>
-          <h2 style={styles.title}>{isSignUp ? 'Create your account' : 'Welcome back'}</h2>
+          <h2 id="auth-modal-title" style={styles.title}>
+            {isSignUp ? 'Create your account' : 'Welcome back'}
+          </h2>
           <p style={styles.subtitle}>
             {isSignUp ? 'Start editing videos with AI' : 'Sign in to sync projects, or keep editing on this computer'}
           </p>
         </div>
-        
+
         {error && (
-          <div style={styles.error}>
-            <span style={styles.errorIcon}>⚠</span>
+          <div role="alert" style={styles.error}>
+            <span style={styles.errorIcon} aria-hidden="true">⚠</span>
             {error}
           </div>
         )}
         {message && (
-          <div style={styles.success}>
-            <span style={styles.successIcon}>✓</span>
+          <div role="status" style={styles.success}>
+            <span style={styles.successIcon} aria-hidden="true">✓</span>
             {message}
           </div>
         )}
@@ -85,8 +109,9 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
         <form onSubmit={handleSubmit} style={styles.form}>
           {isSignUp && (
             <div style={styles.inputGroup}>
-              <label style={styles.label}>Full Name</label>
+              <label htmlFor="auth-fullname" style={styles.label}>Full Name</label>
               <input
+                id="auth-fullname"
                 type="text"
                 placeholder="John Doe"
                 value={fullName}
@@ -106,8 +131,9 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
             </div>
           )}
           <div style={styles.inputGroup}>
-            <label style={styles.label}>Email</label>
+            <label htmlFor="auth-email" style={styles.label}>Email</label>
             <input
+              id="auth-email"
               type="email"
               placeholder="you@example.com"
               value={email}
@@ -126,8 +152,9 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
             />
           </div>
           <div style={styles.inputGroup}>
-            <label style={styles.label}>Password</label>
+            <label htmlFor="auth-password" style={styles.label}>Password</label>
             <input
+              id="auth-password"
               type="password"
               placeholder="••••••••"
               value={password}
@@ -149,8 +176,8 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
               <p style={styles.passwordHint}>Must be at least 6 characters</p>
             )}
           </div>
-          <button 
-            type="submit" 
+          <button
+            type="submit"
             style={{
               ...styles.button,
               opacity: isLoading ? 0.6 : 1,
@@ -185,8 +212,9 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
           <div style={styles.dividerLine} />
         </div>
 
-        <button 
-          onClick={handleGitHub} 
+        <button
+          type="button"
+          onClick={handleGitHub}
           style={{
             ...styles.githubButton,
             opacity: githubLoading ? 0.6 : 1,
@@ -207,7 +235,7 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
           {githubLoading ? (
             <ButtonSpinner />
           ) : (
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
             </svg>
           )}
@@ -223,6 +251,7 @@ export function AuthModal({ onClose }: { onClose?: () => void }) {
         <p style={styles.switchText}>
           {isSignUp ? 'Already have an account?' : "Don't have an account?"}{' '}
           <button
+            type="button"
             onClick={() => {
               setIsSignUp(!isSignUp)
               setError('')
@@ -254,6 +283,7 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 1000,
   },
   modal: {
+    position: 'relative',
     background: '#1a1a1a',
     border: '1px solid #2a2a2a',
     borderRadius: 16,
@@ -261,6 +291,17 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     maxWidth: 420,
     boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)',
+  },
+  closeButton: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    background: 'none',
+    border: 'none',
+    color: '#777',
+    fontSize: 16,
+    cursor: 'pointer',
+    padding: '4px 6px',
   },
   header: {
     textAlign: 'center',
@@ -369,6 +410,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     cursor: 'pointer',
     transition: 'all 0.2s',
+    width: '100%',
   },
   switchText: {
     textAlign: 'center',

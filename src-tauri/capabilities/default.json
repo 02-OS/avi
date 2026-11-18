@@ -13,8 +13,6 @@
     "core:default",
     "dialog:default",
     "fs:default",
-    "fs:allow-write-file",
-    "fs:scope-home-recursive",
     "fs:scope-download-recursive",
     "fs:scope-document-recursive",
     "fs:scope-desktop-recursive",

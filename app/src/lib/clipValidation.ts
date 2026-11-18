@@ -108,23 +108,27 @@ export function normalizeTimeline(tracks: Track[]): {
   tracks: Track[]
   offsetFrames: number
 } {
-  const clips = tracks.flatMap((track) => track.clips)
-  const minStart = clips.length > 0 ? Math.min(...clips.map((clip) => clip.startFrame)) : 0
-
-  if (minStart === 0) {
+  // Preserve intentional intro gaps; only clamp negative start frames if any slipped through.
+  const hasNegative = tracks.some((track) =>
+    track.clips.some((clip) => clip.startFrame < 0 || clip.endFrame < 0)
+  )
+  if (!hasNegative) {
     return { tracks, offsetFrames: 0 }
   }
 
   return {
     tracks: tracks.map((track) => ({
       ...track,
-      clips: track.clips.map((clip) => ({
-        ...clip,
-        startFrame: Math.max(0, clip.startFrame - minStart),
-        endFrame: Math.max(0, clip.endFrame - minStart),
-      })),
+      clips: track.clips.map((clip) => {
+        const shift = clip.startFrame < 0 ? -clip.startFrame : 0
+        return {
+          ...clip,
+          startFrame: Math.max(0, clip.startFrame + shift),
+          endFrame: Math.max(0, clip.endFrame + shift),
+        }
+      }),
     })),
-    offsetFrames: minStart,
+    offsetFrames: 0,
   }
 }
 
@@ -133,10 +137,24 @@ export function getSafeMediaTrimProps(clip: Clip): {
   trimAfter?: number
 } {
   const trimBeforeFrames = getClipTrimInFrames(clip)
-  const trimAfterFrames = getClipTrimOutFrames(clip)
+  const trimBefore = trimBeforeFrames > 0 ? trimBeforeFrames : undefined
+
+  if (clip.mediaEnd == null) {
+    return { trimBefore, trimAfter: undefined }
+  }
+
+  // Remotion 4 trimAfter is the exclusive end source-frame coordinate (strictly > trimBefore).
+  const trimAfterCandidate = Math.floor(clip.mediaEnd) + 1
+  const hasTailTrim =
+    clip.mediaDurationFrames == null ||
+    trimAfterCandidate < Math.floor(clip.mediaDurationFrames)
+  const trimAfter =
+    hasTailTrim && trimAfterCandidate > trimBeforeFrames
+      ? trimAfterCandidate
+      : undefined
 
   return {
-    trimBefore: trimBeforeFrames > 0 ? trimBeforeFrames : undefined,
-    trimAfter: trimAfterFrames > 0 ? Math.max(1, trimAfterFrames) : undefined,
+    trimBefore,
+    trimAfter,
   }
 }

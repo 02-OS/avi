@@ -1,4 +1,4 @@
-import { loadWasmApi } from '../hooks/useWasm'
+import { getCachedWasmApi, loadWasmApi, type WasmApi } from '../hooks/useWasm'
 
 export const PIXEL_FILTERS = ['grayscale', 'sepia', 'invert', 'brightness', 'warm'] as const
 
@@ -30,18 +30,56 @@ export function isPixelFilter(value: string): value is PixelFilterName {
   return (PIXEL_FILTERS as readonly string[]).includes(value)
 }
 
-export async function applyPixelFilter(pixels: Uint8Array, filter: PixelFilterName): Promise<Uint8Array> {
-  const api = await loadWasmApi()
+function runScratchFilter(api: WasmApi, byteLen: number, filter: PixelFilterName): void {
   switch (filter) {
     case 'grayscale':
-      return api.grayscale(pixels)
+      api.grayscale_in_place(byteLen)
+      break
     case 'sepia':
-      return api.sepia(pixels)
+      api.sepia_in_place(byteLen)
+      break
     case 'invert':
-      return api.invert(pixels)
+      api.invert_in_place(byteLen)
+      break
     case 'brightness':
-      return api.brightness(pixels, 1.5)
+      api.brightness_in_place(byteLen, 1.5)
+      break
     case 'warm':
-      return api.color_matrix(pixels, WARM_MATRIX)
+      api.color_matrix_in_place(byteLen, WARM_MATRIX)
+      break
   }
+}
+
+export function applyPixelFilterInPlaceSync(
+  api: WasmApi,
+  pixels: Uint8ClampedArray | Uint8Array,
+  filter: PixelFilterName
+): void {
+  const byteLen = pixels.byteLength
+  if (byteLen === 0) return
+
+  const ptr = api.alloc_scratch(byteLen)
+  // Re-create view over memory.buffer after alloc_scratch in case WASM memory grew.
+  new Uint8Array(api.memory.buffer, ptr, byteLen).set(pixels)
+  runScratchFilter(api, byteLen, filter)
+  pixels.set(new Uint8Array(api.memory.buffer, ptr, byteLen))
+}
+
+export async function applyPixelFilterInPlace(
+  pixels: Uint8ClampedArray | Uint8Array,
+  filter: PixelFilterName
+): Promise<void> {
+  const cached = getCachedWasmApi()
+  if (cached) {
+    applyPixelFilterInPlaceSync(cached, pixels, filter)
+    return
+  }
+
+  const api = await loadWasmApi()
+  applyPixelFilterInPlaceSync(api, pixels, filter)
+}
+
+export async function applyPixelFilter(pixels: Uint8Array, filter: PixelFilterName): Promise<Uint8Array> {
+  await applyPixelFilterInPlace(pixels, filter)
+  return pixels
 }

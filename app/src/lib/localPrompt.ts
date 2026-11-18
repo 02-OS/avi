@@ -45,6 +45,22 @@ const extractFrameCount = (text: string): number | null => {
   return match ? Number.parseInt(match[1], 10) : null
 }
 
+const hasWord = (text: string, word: string): boolean => {
+  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\b${escaped}\\b`, 'i').test(text)
+}
+
+const maxClipEndByMedia = (clip: Clip): number => {
+  if (
+    (clip.mediaType === 'video' || clip.mediaType === 'audio') &&
+    clip.mediaDurationFrames != null
+  ) {
+    const mediaStart = clip.mediaStart ?? 0
+    return clip.startFrame + Math.max(0, clip.mediaDurationFrames - mediaStart - 1)
+  }
+  return Number.MAX_SAFE_INTEGER
+}
+
 export function applyLocalPrompt(input: LocalPromptInput): LocalPromptResult {
   const prompt = input.prompt.toLowerCase()
   const changes: string[] = []
@@ -57,54 +73,73 @@ export function applyLocalPrompt(input: LocalPromptInput): LocalPromptResult {
       const next: Clip = { ...clip }
 
       for (const [word, hex] of Object.entries(COLOUR_MAP)) {
-        if (prompt.includes(word)) {
+        if (hasWord(prompt, word)) {
           next.color = hex
           changes.push(`Changed "${next.label}" colour to ${word}`)
           break
         }
       }
 
-      if (prompt.includes('longer') || prompt.includes('extend') || prompt.includes('stretch')) {
+      if (hasWord(prompt, 'longer') || hasWord(prompt, 'extend') || hasWord(prompt, 'stretch')) {
         const delta = extractFrameCount(prompt) ?? 15
-        next.endFrame = Math.min(next.endFrame + delta, Math.max(input.totalFrames - 1, next.endFrame))
-        changes.push(`Extended "${next.label}" by ${delta} frames`)
+        const mediaCap = maxClipEndByMedia(next)
+        const nextEnd = Math.min(next.endFrame + delta, Math.max(next.endFrame, mediaCap))
+        if (nextEnd > next.endFrame) {
+          next.endFrame = nextEnd
+          if (next.mediaEnd != null && next.mediaStart != null) {
+            next.mediaEnd = next.mediaStart + (next.endFrame - next.startFrame)
+            if (next.mediaDurationFrames != null) {
+              next.mediaEnd = Math.min(next.mediaEnd, next.mediaDurationFrames - 1)
+            }
+          }
+          changes.push(`Extended "${next.label}" by ${next.endFrame - clip.endFrame} frames`)
+        }
       }
 
-      if (prompt.includes('shorter') || prompt.includes('trim') || prompt.includes('shorten')) {
+      if (hasWord(prompt, 'shorter') || hasWord(prompt, 'trim') || hasWord(prompt, 'shorten')) {
         const delta = extractFrameCount(prompt) ?? 15
-        next.endFrame = Math.max(next.endFrame - delta, next.startFrame + 5)
+        next.endFrame = Math.max(next.startFrame, next.endFrame - delta)
         if (next.mediaEnd != null && next.mediaStart != null) {
           next.mediaEnd = Math.min(next.mediaStart + (next.endFrame - next.startFrame), next.mediaEnd)
         }
-        changes.push(`Trimmed "${next.label}" by ${delta} frames`)
+        changes.push(`Trimmed "${next.label}" by ${clip.endFrame - next.endFrame} frames`)
       }
 
-      if (prompt.includes('rename') || prompt.includes('label') || prompt.includes('call it')) {
-        const match = input.prompt.match(/(?:rename|label|call it)\s+(?:to\s+)?["']?([^"'\n]+?)["']?$/i)
+      if (hasWord(prompt, 'rename') || hasWord(prompt, 'label') || /\bcall it\b/i.test(prompt)) {
+        const match = input.prompt.match(/\b(?:rename|label|call it)\s+(?:to\s+)?["']?([^"'\n]+?)["']?$/i)
         if (match?.[1]) {
           changes.push(`Renamed "${next.label}" to "${match[1].trim()}"`)
           next.label = match[1].trim()
         }
       }
 
-      if (prompt.includes('transparent') || prompt.includes('opacity') || prompt.includes('fade')) {
+      if (hasWord(prompt, 'transparent') || hasWord(prompt, 'opacity') || hasWord(prompt, 'fade')) {
         next.opacity = 0.5
         changes.push(`Set "${next.label}" opacity to 50%`)
       }
 
-      if (prompt.includes('grayscale') || prompt.includes('greyscale') || prompt.includes('black and white')) {
+      if (
+        hasWord(prompt, 'grayscale') ||
+        hasWord(prompt, 'greyscale') ||
+        /\bblack and white\b/i.test(prompt)
+      ) {
         next.pixelFilter = 'grayscale'
         changes.push(`Applied grayscale to "${next.label}"`)
-      } else if (prompt.includes('sepia')) {
+      } else if (hasWord(prompt, 'sepia')) {
         next.pixelFilter = 'sepia'
         changes.push(`Applied sepia to "${next.label}"`)
-      } else if (prompt.includes('invert')) {
+      } else if (hasWord(prompt, 'invert') || hasWord(prompt, 'inverted')) {
         next.pixelFilter = 'invert'
         changes.push(`Inverted "${next.label}"`)
-      } else if (prompt.includes('bright')) {
+      } else if (
+        hasWord(prompt, 'bright') ||
+        hasWord(prompt, 'brighter') ||
+        hasWord(prompt, 'brighten') ||
+        hasWord(prompt, 'brightness')
+      ) {
         next.pixelFilter = 'brightness'
         changes.push(`Raised brightness on "${next.label}"`)
-      } else if (prompt.includes('warm')) {
+      } else if (hasWord(prompt, 'warm') || hasWord(prompt, 'warmer')) {
         next.pixelFilter = 'warm'
         changes.push(`Applied a warm grade to "${next.label}"`)
       }
@@ -113,7 +148,7 @@ export function applyLocalPrompt(input: LocalPromptInput): LocalPromptResult {
     }),
   }))
 
-  if (prompt.includes('split')) {
+  if (hasWord(prompt, 'split')) {
     tracks = tracks.map((track) => {
       const clips: Clip[] = []
       for (const clip of track.clips) {
@@ -143,8 +178,8 @@ export function applyLocalPrompt(input: LocalPromptInput): LocalPromptResult {
     })
   }
 
-  if (prompt.includes('add text') || prompt.includes('text overlay') || prompt.includes('add title')) {
-    const textMatch = input.prompt.match(/(?:text|title)\s+["']([^"']+)["']/i)
+  if (/\badd text\b|\btext overlay\b|\badd title\b/i.test(prompt)) {
+    const textMatch = input.prompt.match(/\b(?:text|title)\s+["']([^"']+)["']/i)
     const text = textMatch?.[1] || 'Sample Text'
     let overlay = tracks.find((track) => track.type === 'overlay')
     if (!overlay) {
@@ -172,9 +207,15 @@ export function applyLocalPrompt(input: LocalPromptInput): LocalPromptResult {
     changes.push(`Added text overlay: "${text}"`)
   }
 
+  const maxClipEnd = tracks.reduce(
+    (max, track) =>
+      track.clips.reduce((trackMax, clip) => Math.max(trackMax, clip.endFrame + 1), max),
+    0
+  )
+
   return {
     tracks,
-    totalFrames: input.totalFrames,
+    totalFrames: Math.max(input.totalFrames, maxClipEnd),
     fps: input.fps,
     explanation:
       changes.length > 0

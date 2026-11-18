@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { PlayerPanel }  from './components/PlayerPanel/PlayerPanel'
 import { PreviewErrorBoundary } from './components/PlayerPanel/PreviewErrorBoundary'
 import { Timeline }     from './components/Timeline/Timeline'
@@ -8,6 +8,7 @@ import { AuthModal }    from './components/AuthModal/AuthModal'
 import { AssetLibrary }  from './components/AssetLibrary/AssetLibrary'
 import { UploadFirstCanvas } from './components/UploadFirstCanvas/UploadFirstCanvas'
 import { ToastContainer } from './components/ToastContainer/ToastContainer'
+import { ProjectSwitcherModal } from './components/ProjectSwitcherModal/ProjectSwitcherModal'
 import { Spinner } from './components/Spinner/Spinner'
 import { useCommandK }        from './hooks/useCommandK'
 import { useGhostPreviewKeys } from './hooks/useGhostPreviewKeys'
@@ -15,40 +16,74 @@ import { useProjectManager } from './hooks/useProjectManager'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
 import { useTimelineShortcuts } from './hooks/useTimelineShortcuts'
 import { useDesktopFileDrop } from './hooks/useDesktopFileDrop'
+import { useModalFocusTrap } from './hooks/useModalFocusTrap'
 import { useAuth } from './lib/authContext'
-import { saveExportFile } from './lib/desktop'
+import { useAssetStore } from './lib/assetService'
+import {
+  exportTimelineNative,
+  extractLocalPathFromDesktopMediaUrl,
+  ffmpegAvailable,
+  isDesktopApp,
+  pickExportPath,
+  saveExportFile,
+  type NativeExportClipInput,
+} from './lib/desktop'
 import { writeLocalProject } from './lib/localProject'
 import { useEditorStore }      from './store/useEditorStore'
 import { toast } from './lib/toastStore'
 import { EXPORT_PRESETS, exportEditedVideo, type ExportPresetName } from './lib/videoExportService'
-import { hasMissingRenderableMedia, hasUsableVideoClips } from './lib/editorUtils'
+import { hasMissingRenderableMedia, hasUsableVideoClips, sortTracksForRender } from './lib/editorUtils'
+
+const buildDefaultExportFilename = (ext: 'mp4' | 'webm') => {
+  const now = new Date()
+  return `avi-export-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}.${ext}`
+}
 
 const App: React.FC = () => {
   const { user, loading: authLoading, signOut } = useAuth()
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [showAssets, setShowAssets] = useState(true)
+  const [showWasmPanel, setShowWasmPanel] = useState(false)
+  const [showProjects, setShowProjects] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportProgress, setExportProgress] = useState(0)
   const [exportPreset, setExportPreset] = useState<ExportPresetName>('720p')
   const [showAuth, setShowAuth] = useState(false)
+  const shortcutsModalRef = useRef<HTMLDivElement>(null)
   const isOnline = useOnlineStatus()
-  
-  // Initialize project manager (auto-save functionality)
-  const { projectId, projectStatus, projectError, retryProjectInit, hasUnsavedChanges, forceSave } = useProjectManager()
-  
-  // Register Cmd+K / Ctrl+K global shortcut
+
+  const {
+    projectId,
+    projectName,
+    projectStatus,
+    projectError,
+    retryProjectInit,
+    forceSave,
+    hasUnsavedChanges,
+    switchProject,
+    createNewCloudProject,
+    renameProjectById,
+    deleteProjectById,
+  } = useProjectManager()
+
+  const isAnyAppModalOpen = (showAuth && !user) || showShortcuts || showProjects
+
   useCommandK()
-  // Register Enter / Esc (proposal) + Cmd+Z/Y (undo/redo)
-  useGhostPreviewKeys()
-  useTimelineShortcuts()
+  useGhostPreviewKeys(isAnyAppModalOpen)
+  useTimelineShortcuts(isAnyAppModalOpen)
   useDesktopFileDrop(projectId)
+  useModalFocusTrap(showShortcuts, shortcutsModalRef, () => setShowShortcuts(false))
 
   const compositionTree = useEditorStore((s) => s.compositionTree)
   const proposedComposition = useEditorStore((s) => s.proposedComposition)
   const totalFrames = useEditorStore((s) => s.totalFrames)
   const fps = useEditorStore((s) => s.fps)
+  const historyIndex = useEditorStore((s) => s.historyIndex)
+  const historyLen = useEditorStore((s) => s.history.length)
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
+  const canUndo = historyIndex > 0
+  const canRedo = historyIndex < historyLen - 1
   const hasPrimaryVideo = hasUsableVideoClips(compositionTree)
   const hasMissingMedia = hasMissingRenderableMedia(compositionTree)
   const isUploadFirst = !hasPrimaryVideo
@@ -71,9 +106,89 @@ const App: React.FC = () => {
 
     setExporting(true)
     setExportProgress(0)
-    toast.info('Preparing your edited video for download...')
 
     try {
+      // On desktop with FFmpeg installed, prefer native offline MP4 rendering when all media files are local.
+      if (isDesktopApp() && (await ffmpegAvailable())) {
+        const assetLocalPaths = new Map(
+          useAssetStore
+            .getState()
+            .assets.filter((asset) => Boolean(asset.local_path))
+            .map((asset) => [asset.id, asset.local_path as string])
+        )
+
+        const orderedTracks = sortTracksForRender(compositionTree)
+        const nativeClips: NativeExportClipInput[] = []
+        let allSourcesLocal = true
+
+        for (const track of orderedTracks) {
+          for (const clip of track.clips) {
+            if (clip.isMissingAsset) continue
+            if (clip.mediaType === 'text') {
+              nativeClips.push({
+                id: clip.id,
+                trackType: track.type,
+                trackMuted: Boolean(track.muted),
+                startFrame: clip.startFrame,
+                endFrame: clip.endFrame,
+                mediaType: 'text',
+                opacity: clip.opacity,
+                text: clip.text,
+                fontSize: clip.fontSize,
+                fontColor: clip.fontColor,
+              })
+              continue
+            }
+
+            if (!clip.mediaType || !clip.assetUrl) continue
+            const localPath =
+              (clip.assetId ? assetLocalPaths.get(clip.assetId) : undefined) ??
+              extractLocalPathFromDesktopMediaUrl(clip.assetUrl)
+
+            if (!localPath) {
+              allSourcesLocal = false
+              break
+            }
+
+            nativeClips.push({
+              id: clip.id,
+              trackType: track.type,
+              trackMuted: Boolean(track.muted),
+              startFrame: clip.startFrame,
+              endFrame: clip.endFrame,
+              mediaType: clip.mediaType,
+              sourcePath: localPath,
+              mediaStart: clip.mediaStart,
+              mediaEnd: clip.mediaEnd,
+              opacity: clip.opacity,
+              pixelFilter: clip.pixelFilter,
+            })
+          }
+          if (!allSourcesLocal) break
+        }
+
+        if (allSourcesLocal && nativeClips.length > 0) {
+          const outputPath = await pickExportPath(buildDefaultExportFilename('mp4'))
+          if (!outputPath) {
+            toast.info('Export cancelled')
+            return
+          }
+          toast.info('Rendering video with FFmpeg...')
+          const { width, height } = EXPORT_PRESETS[exportPreset]
+          await exportTimelineNative({
+            outputPath,
+            width,
+            height,
+            fps,
+            totalFrames,
+            clips: nativeClips,
+          })
+          toast.success('Edited video exported.')
+          return
+        }
+      }
+
+      toast.info('Preparing your edited video for download...')
       const { blob, filename } = await exportEditedVideo({
         tracks: compositionTree,
         totalFrames,
@@ -169,15 +284,15 @@ const App: React.FC = () => {
       >
         {/* Logo */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 18, color: '#e94560' }}>✦</span>
+          <span style={{ fontSize: 18, color: '#e94560' }} aria-hidden="true">✦</span>
           <span style={{ fontSize: 16, fontWeight: 800, color: '#fff', letterSpacing: 0.5 }}>
             avi
           </span>
-          <div style={{ 
-            width: 1, 
-            height: 20, 
+          <div style={{
+            width: 1,
+            height: 20,
             background: '#2a2a2a',
-            margin: '0 8px' 
+            margin: '0 8px',
           }} />
           <span style={{ fontSize: 11, color: '#666', fontWeight: 500 }}>
             AI Video Editor
@@ -188,6 +303,7 @@ const App: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 16 }}>
             <button
               onClick={() => setShowAssets(!showAssets)}
+              aria-pressed={showAssets}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -202,11 +318,11 @@ const App: React.FC = () => {
                 transition: 'all 0.2s',
               }}
             >
-              <span>📂</span>
+              <span aria-hidden="true">📂</span>
               Assets
             </button>
             <button
-              onClick={handleSave}
+              onClick={() => void handleSave()}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -221,7 +337,7 @@ const App: React.FC = () => {
                 transition: 'all 0.2s',
               }}
             >
-              <span>💾</span>
+              <span aria-hidden="true">💾</span>
               {hasUnsavedChanges ? 'Save •' : 'Saved'}
             </button>
             <select
@@ -245,7 +361,7 @@ const App: React.FC = () => {
               ))}
             </select>
             <button
-              onClick={handleExport}
+              onClick={() => void handleExport()}
               disabled={exporting || hasMissingMedia || Boolean(proposedComposition)}
               style={{
                 display: 'flex',
@@ -266,14 +382,17 @@ const App: React.FC = () => {
                   ? 'Accept or reject the AI preview before exporting'
                   : hasMissingMedia
                     ? 'Missing local media blocks export'
-                    : 'Download edited video'
+                    : 'Export edited video'
               }
             >
-              <span>⬇</span>
-              {exporting ? `Exporting ${exportProgress}%` : 'Export'}
+              <span aria-hidden="true">⬇</span>
+              {exporting ? (exportProgress > 0 ? `Exporting ${exportProgress}%` : 'Exporting...') : 'Export'}
             </button>
             <button
               onClick={undo}
+              disabled={!canUndo}
+              aria-label="Undo"
+              title="Undo (⌘Z)"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -284,14 +403,18 @@ const App: React.FC = () => {
                 color: '#aaa',
                 fontSize: 12,
                 padding: '6px 12px',
-                cursor: 'pointer',
+                cursor: canUndo ? 'pointer' : 'not-allowed',
+                opacity: canUndo ? 1 : 0.4,
                 transition: 'all 0.2s',
               }}
             >
-              <span>↩</span>
+              <span aria-hidden="true">↩</span>
             </button>
             <button
               onClick={redo}
+              disabled={!canRedo}
+              aria-label="Redo"
+              title="Redo (⌘⇧Z)"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -302,33 +425,65 @@ const App: React.FC = () => {
                 color: '#aaa',
                 fontSize: 12,
                 padding: '6px 12px',
-                cursor: 'pointer',
+                cursor: canRedo ? 'pointer' : 'not-allowed',
+                opacity: canRedo ? 1 : 0.4,
                 transition: 'all 0.2s',
               }}
             >
-              <span>↪</span>
+              <span aria-hidden="true">↪</span>
+            </button>
+            <button
+              onClick={() => setShowWasmPanel((visible) => !visible)}
+              aria-pressed={showWasmPanel}
+              title="Toggle WASM filter benchmark panel"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                background: showWasmPanel ? 'rgba(99, 160, 255, 0.16)' : '#252525',
+                border: showWasmPanel ? '1px solid rgba(99, 160, 255, 0.5)' : '1px solid #333',
+                borderRadius: 6,
+                color: showWasmPanel ? '#63a0ff' : '#888',
+                fontSize: 11,
+                fontFamily: 'monospace',
+                padding: '6px 10px',
+                cursor: 'pointer',
+              }}
+            >
+              ⬡ WASM
             </button>
           </div>
         )}
 
         <div style={{ flex: 1 }} />
 
-        {/* Project ID indicator */}
+        {/* Project switcher button */}
         {projectId && (
-          <div style={{
-            fontSize: 10,
-            color: hasUnsavedChanges ? '#f59e0b' : '#555',
-            background: '#1a1a1a',
-            padding: '4px 8px',
-            borderRadius: 4,
-            fontFamily: 'monospace',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-          }}>
-            {hasUnsavedChanges && <span style={{ fontSize: 8 }}>●</span>}
-            ID: {projectId.slice(0, 8)}...
-          </div>
+          <button
+            onClick={() => setShowProjects(true)}
+            title="Switch or manage projects"
+            aria-label={`Projects (${projectName})`}
+            style={{
+              fontSize: 11,
+              color: hasUnsavedChanges ? '#f59e0b' : '#aaa',
+              background: '#1a1a1a',
+              border: '1px solid #2e2e2e',
+              padding: '4px 10px',
+              borderRadius: 6,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              cursor: 'pointer',
+            }}
+          >
+            {hasUnsavedChanges && <span style={{ fontSize: 8 }} aria-hidden="true">●</span>}
+            <span style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {projectName}
+            </span>
+            <span style={{ fontSize: 10, color: '#555', fontFamily: 'monospace' }}>
+              {projectId.slice(0, 8)}
+            </span>
+          </button>
         )}
 
         {/* Offline indicator */}
@@ -344,16 +499,16 @@ const App: React.FC = () => {
             alignItems: 'center',
             gap: 6,
           }}>
-            <span>⚠</span>
+            <span aria-hidden="true">⚠</span>
             Offline
           </div>
         )}
 
         {/* User info and actions */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {/* Keyboard shortcuts button */}
           <button
             onClick={() => setShowShortcuts(!showShortcuts)}
+            aria-label="Keyboard shortcuts"
             style={{
               background: 'none',
               border: 'none',
@@ -368,25 +523,27 @@ const App: React.FC = () => {
             ⌨
           </button>
 
-          {/* User avatar */}
-          <div style={{
-            width: 28,
-            height: 28,
-            borderRadius: '50%',
-            background: 'linear-gradient(135deg, #e94560 0%, #1a6cf0 100%)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 12,
-            fontWeight: 700,
-            color: '#fff',
-          }}>
+          <div
+            aria-hidden="true"
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: '50%',
+              background: 'linear-gradient(135deg, #e94560 0%, #1a6cf0 100%)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 12,
+              fontWeight: 700,
+              color: '#fff',
+            }}
+          >
             {user?.email?.charAt(0).toUpperCase() || 'U'}
           </div>
-          
+
           {user ? (
             <button
-              onClick={handleSignOut}
+              onClick={() => void handleSignOut()}
               style={{
                 background: '#252525',
                 border: '1px solid #333',
@@ -421,7 +578,7 @@ const App: React.FC = () => {
 
       {!isUploadFirst ? (
         <>
-          <WasmPanel />
+          {showWasmPanel && <WasmPanel />}
 
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
             {showAssets && (
@@ -447,8 +604,20 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* ── AI Prompt modal (rendered at root, above everything) ── */}
+      {/* ── Modals ── */}
       {showAuth && !user && <AuthModal onClose={() => setShowAuth(false)} />}
+
+      <ProjectSwitcherModal
+        isOpen={showProjects}
+        isSignedIn={Boolean(user)}
+        currentProjectId={projectId}
+        onClose={() => setShowProjects(false)}
+        onOpenAuth={() => setShowAuth(true)}
+        onSelectProject={switchProject}
+        onCreateProject={createNewCloudProject}
+        onRenameProject={renameProjectById}
+        onDeleteProject={deleteProjectById}
+      />
 
       <PromptModal />
 
@@ -465,25 +634,35 @@ const App: React.FC = () => {
               zIndex: 40,
             }}
           />
-          <div style={{
-            position: 'fixed',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            background: '#1a1a1a',
-            border: '1px solid #2a2a2a',
-            borderRadius: 12,
-            padding: '24px',
-            minWidth: 320,
-            zIndex: 50,
-            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)',
-          }}>
-            <h3 style={{ 
-              margin: '0 0 16px 0', 
-              fontSize: 16, 
-              fontWeight: 700, 
-              color: '#fff' 
-            }}>
+          <div
+            ref={shortcutsModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shortcuts-modal-title"
+            tabIndex={-1}
+            style={{
+              position: 'fixed',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              background: '#1a1a1a',
+              border: '1px solid #2a2a2a',
+              borderRadius: 12,
+              padding: '24px',
+              minWidth: 320,
+              zIndex: 50,
+              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)',
+            }}
+          >
+            <h3
+              id="shortcuts-modal-title"
+              style={{
+                margin: '0 0 16px 0',
+                fontSize: 16,
+                fontWeight: 700,
+                color: '#fff',
+              }}
+            >
               Keyboard Shortcuts
             </h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -502,9 +681,9 @@ const App: React.FC = () => {
                 { keys: 'Shift+← / →', action: 'Nudge selected clip by 5 frames' },
                 { keys: 'Space', action: 'Play/Pause' },
               ].map(({ keys, action }) => (
-                <div key={keys} style={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
+                <div key={keys} style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
                   alignItems: 'center',
                   padding: '8px 0',
                   borderBottom: '1px solid #2a2a2a',
@@ -543,7 +722,7 @@ const App: React.FC = () => {
           </div>
         </>
       )}
-      
+
       {/* ── Toast notifications ── */}
       <ToastContainer />
     </div>

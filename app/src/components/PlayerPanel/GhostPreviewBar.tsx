@@ -1,33 +1,55 @@
 import React, { useMemo } from 'react'
-import { useEditorStore } from '../../store/useEditorStore'
+import { type Clip, useEditorStore } from '../../store/useEditorStore'
+
+function clipsDiffer(a: Clip, b: Clip): boolean {
+  return (
+    a.trackId !== b.trackId ||
+    a.startFrame !== b.startFrame ||
+    a.endFrame !== b.endFrame ||
+    a.label !== b.label ||
+    a.color !== b.color ||
+    a.assetId !== b.assetId ||
+    a.mediaType !== b.mediaType ||
+    a.mediaStart !== b.mediaStart ||
+    a.mediaEnd !== b.mediaEnd ||
+    a.opacity !== b.opacity ||
+    a.pixelFilter !== b.pixelFilter ||
+    a.text !== b.text ||
+    a.fontSize !== b.fontSize ||
+    a.fontColor !== b.fontColor
+  )
+}
 
 export const GhostPreviewBar: React.FC = () => {
-  const compositionTree    = useEditorStore((s) => s.compositionTree)
+  const compositionTree     = useEditorStore((s) => s.compositionTree)
   const proposedComposition = useEditorStore((s) => s.proposedComposition)
-  const historyIndex       = useEditorStore((s) => s.historyIndex)
-  const historyLen         = useEditorStore((s) => s.history.length)
-  const acceptProposal     = useEditorStore((s) => s.acceptProposal)
-  const rejectProposal     = useEditorStore((s) => s.rejectProposal)
-  const undo               = useEditorStore((s) => s.undo)
-  const redo               = useEditorStore((s) => s.redo)
+  const historyIndex        = useEditorStore((s) => s.historyIndex)
+  const historyLen          = useEditorStore((s) => s.history.length)
+  const acceptProposal      = useEditorStore((s) => s.acceptProposal)
+  const rejectProposal      = useEditorStore((s) => s.rejectProposal)
+  const undo                = useEditorStore((s) => s.undo)
+  const redo                = useEditorStore((s) => s.redo)
 
-  // Compute which clips actually changed vs original
+  // Compute which clips actually changed, were added, or were removed vs original
   const diff = useMemo(() => {
     if (!proposedComposition) return null
     const orig     = compositionTree.flatMap((t) => t.clips)
     const proposed = proposedComposition.flatMap((t) => t.clips)
 
+    const origById = new Map(orig.map((c) => [c.id, c]))
+    const proposedById = new Map(proposed.map((c) => [c.id, c]))
+
     const changed = proposed.filter((pc) => {
-      const oc = orig.find((c) => c.id === pc.id)
-      if (!oc) return true
-      return (
-        oc.label      !== pc.label  ||
-        oc.color      !== pc.color  ||
-        oc.startFrame !== pc.startFrame ||
-        oc.endFrame   !== pc.endFrame
-      )
+      const oc = origById.get(pc.id)
+      return !oc || clipsDiffer(oc, pc)
     })
-    return { count: changed.length, clips: changed }
+    const removed = orig.filter((oc) => !proposedById.has(oc.id))
+
+    return {
+      count: changed.length + removed.length,
+      removedCount: removed.length,
+      clips: changed,
+    }
   }, [compositionTree, proposedComposition])
 
   const canUndo = historyIndex > 0
@@ -65,7 +87,8 @@ export const GhostPreviewBar: React.FC = () => {
             <span style={{ color: '#63a0ff', fontWeight: 700 }}>
               {diff.count} clip{diff.count !== 1 ? 's' : ''}
             </span>
-            {' '}modified — review the split-screen preview
+            {' '}
+            {diff.removedCount > 0 ? `changed (${diff.removedCount} removed)` : 'modified'} — review the split-screen preview
           </span>
 
           <button onClick={acceptProposal} style={{ ...btnBase, background: '#059669', marginLeft: 'auto' }}>
@@ -86,6 +109,7 @@ export const GhostPreviewBar: React.FC = () => {
         <button
           onClick={undo}
           disabled={!canUndo}
+          aria-label="Undo"
           title="Undo (⌘Z)"
           style={{ ...btnBase, opacity: canUndo ? 1 : 0.3, cursor: canUndo ? 'pointer' : 'not-allowed' }}
         >
@@ -94,6 +118,7 @@ export const GhostPreviewBar: React.FC = () => {
         <button
           onClick={redo}
           disabled={!canRedo}
+          aria-label="Redo"
           title="Redo (⌘⇧Z)"
           style={{ ...btnBase, opacity: canRedo ? 1 : 0.3, cursor: canRedo ? 'pointer' : 'not-allowed' }}
         >

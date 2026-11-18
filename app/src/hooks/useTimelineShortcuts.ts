@@ -1,17 +1,13 @@
 import { useEffect } from 'react'
 import { useEditorStore } from '../store/useEditorStore'
+import { isTypingTarget } from '../lib/editorUtils'
 import { toast } from '../lib/toastStore'
 
-const isTypingTarget = (target: EventTarget | null) => {
-  if (!(target instanceof HTMLElement)) return false
-
-  const tagName = target.tagName.toLowerCase()
-  return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select'
-}
-
-export const useTimelineShortcuts = () => {
+export const useTimelineShortcuts = (isModalOpen = false) => {
   const isPromptOpen = useEditorStore((state) => state.isPromptOpen)
+  const assetPickerClip = useEditorStore((state) => state.assetPickerClip)
   const setSelection = useEditorStore((state) => state.setSelection)
+  const setIsPlaying = useEditorStore((state) => state.setIsPlaying)
   const removeClip = useEditorStore((state) => state.removeClip)
   const rippleDeleteClip = useEditorStore((state) => state.rippleDeleteClip)
   const moveClip = useEditorStore((state) => state.moveClip)
@@ -20,10 +16,19 @@ export const useTimelineShortcuts = () => {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (isPromptOpen || isTypingTarget(event.target)) return
+      if (isModalOpen || isPromptOpen || assetPickerClip || isTypingTarget(event.target)) return
       if (event.metaKey || event.ctrlKey || event.altKey) return
 
       const state = useEditorStore.getState()
+
+      if (event.code === 'Space' || event.key === ' ') {
+        // Let focused buttons handle Space normally when user explicitly focused a button.
+        if (event.target instanceof HTMLButtonElement) return
+        event.preventDefault()
+        setIsPlaying(!state.isPlaying)
+        return
+      }
+
       const selectedClip = state.selectedClip
       if (!selectedClip) return
 
@@ -72,5 +77,16 @@ export const useTimelineShortcuts = () => {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [duplicateClip, isPromptOpen, moveClip, removeClip, rippleDeleteClip, setSelection, splitClip])
+  }, [
+    assetPickerClip,
+    duplicateClip,
+    isModalOpen,
+    isPromptOpen,
+    moveClip,
+    removeClip,
+    rippleDeleteClip,
+    setIsPlaying,
+    setSelection,
+    splitClip,
+  ])
 }

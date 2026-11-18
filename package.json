@@ -1,10 +1,14 @@
 {
   "name": "avi",
   "private": true,
+  "license": "MIT",
   "workspaces": [
     "app",
     "api"
   ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
   "description": "avi desktop video editor",
   "scripts": {
     "start": "tauri dev",
